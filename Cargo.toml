@@ -1,0 +1,32 @@
+[package]
+name = "jperformance-unified"
+version = "1.0.0"
+edition = "2024"
+description = "Your PC and your servers over time, in one app"
+license = "MIT"
+
+[[bin]]
+name = "JPerformanceUnified"
+path = "src/main.rs"
+
+[dependencies]
+chrono = "0.4.45"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11.1"
+sysinfo = "0.39.6"
+tauri = { version = "2", features = ["custom-protocol"] }
+tauri-plugin-single-instance = "2"
+ureq = { version = "3", features = ["json"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_Console", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+winreg = "0.56.0"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+codegen-units = 4
