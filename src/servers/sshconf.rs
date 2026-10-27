@@ -4,8 +4,10 @@
 
 use crate::cmd;
 use crate::paths;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(serde::Serialize, Clone, Debug)]
 pub struct Host {
@@ -146,6 +148,39 @@ pub fn resolve(alias: &str) -> Host {
         identity_files: ids,
         proxy_jump: if jump == "none" { String::new() } else { jump },
     }
+}
+
+/// Answers from `ssh -G` for the window, kept for five minutes: each call takes a few
+/// hundred milliseconds, and every page shows the addresses.
+static LOOKUPS: LazyLock<Mutex<HashMap<String, (Instant, Host)>>> = LazyLock::new(Default::default);
+const LOOKUP_TTL: Duration = Duration::from_secs(300);
+
+/// `resolve` for the window, from a recent answer when there is one.
+pub fn lookup(alias: &str) -> Host {
+    lookup_all(&[alias.to_string()]).pop().unwrap_or_else(|| resolve(alias))
+}
+
+/// `lookup` for several hosts; the ones not known yet are resolved at the same time.
+pub fn lookup_all(aliases: &[String]) -> Vec<Host> {
+    let fresh = |a: &String| {
+        let cache = LOOKUPS.lock().unwrap();
+        cache.get(a).filter(|(at, _)| at.elapsed() < LOOKUP_TTL).map(|(_, h)| h.clone())
+    };
+    let missing: Vec<&String> = aliases.iter().filter(|a| fresh(a).is_none()).collect();
+    let found: Vec<Host> = std::thread::scope(|s| {
+        let handles: Vec<_> = missing.iter().map(|a| s.spawn(move || resolve(a))).collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+    let mut cache = LOOKUPS.lock().unwrap();
+    for h in found {
+        cache.insert(h.alias.clone(), (Instant::now(), h));
+    }
+    aliases.iter().map(|a| cache.get(a).map(|(_, h)| h.clone()).unwrap_or_else(|| resolve(a))).collect()
+}
+
+/// Forgets the remembered answers, for Scan again.
+pub fn forget() {
+    LOOKUPS.lock().unwrap().clear();
 }
 
 /// Who besides you can read a private key file. OpenSSH refuses keys that

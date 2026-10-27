@@ -83,6 +83,7 @@ function go(page, machine, tab) {
   S.page = page; S.machine = machine || null; S.pinned = null; S.recSel = null;
   S.tab = tab || (machine === 'pc' ? 'now' : 'summary');
   S.sort = machine && machine !== 'pc' ? 'mem' : 'cpu';
+  if (S.side) renderSide();
   render(true);
 }
 
@@ -268,7 +269,7 @@ function renderSide() {
         : `<button class="nav" data-go="settings">${ic('server')}Add servers over SSH</button>`}
     </nav>
     <div class="side-foot">${upd}${recLine}
-      <button class="nav" ${cur('settings')} data-go="settings">${ic('gear')}Settings</button>
+      <button class="nav" ${cur('settings')} data-go="settings">${ic('gear')}Settings${sd.version ? `<span class="count">v${esc(sd.version)}</span>` : ''}</button>
     </div>`;
   setHTML(document.getElementById('side'), html);
 }
@@ -674,13 +675,14 @@ async function pageKeys() {
 /* ================= Settings ================= */
 const IMPORT_TEXT = { copied: 'Copied', not_found: 'Not found', failed: 'Could not copy' };
 async function pageSettings() {
-  const d = await invoke('settings');
+  const d = await invoke('settings', { rescan: !!S.rescan });
+  S.rescan = false;
   S.theme = d.theme;
   const imp = d.imported;
   const importLine = ['jperformance', 'jserver'].map(k => `${k === 'jperformance' ? 'JPerformance' : 'JServer'}: ${imp[k] ? IMPORT_TEXT[imp[k]] : 'Not checked yet'}`).join(' · ');
   const u = S.update;
   const updText = u.state === 'checking' ? 'Checking GitHub for a new release.'
-    : u.state === 'up_to_date' ? 'You have the latest version.'
+    : u.state === 'up_to_date' ? `You have the latest version.${S.checkedAt ? ` Checked ${ago(S.checkedAt)}.` : ''}`
     : u.state === 'available' ? `Version ${esc(u.version)} is ready to install.`
     : u.state === 'downloading' ? `Downloading the update${u.total ? `, ${Math.round(u.done / u.total * 100)}%` : ''}.`
     : u.state === 'restarting' ? 'Restarting to finish the update.'
@@ -712,7 +714,7 @@ async function pageSettings() {
       <div class="set-row"><div><div class="t">Theme</div></div>${seg('theme', [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']], S.theme)}</div>
     </div></section>
     <section class="panel"><div class="panel-head"><h2>Updates</h2></div><div class="set-list" style="margin-top:4px">
-      <div class="set-row"><div><div class="t">Version ${esc(d.version)}</div><div class="d">${updText} Downloads are checked against the SHA-256 GitHub publishes before they replace the app.</div></div><div class="toolbar">${u.state === 'available' ? `<button class="btn" data-dialog="update">What's new in ${esc(u.version)}</button><button class="btn primary" data-action="install">${ic('download')}Install and restart</button>` : `<button class="btn" data-action="check" ${u.state === 'checking' || u.state === 'downloading' ? 'disabled' : ''}>${ic('refresh')}Check now</button>`}</div></div>
+      <div class="set-row"><div><div class="t">JPerformance Unified ${esc(d.version)}</div><div class="d">${updText} Downloads are checked against the SHA-256 GitHub publishes before they replace the app.</div></div><div class="toolbar">${u.state === 'available' ? `<button class="btn" data-dialog="update">What's new in ${esc(u.version)}</button><button class="btn primary" data-action="install">${ic('download')}Install and restart</button>` : `<button class="btn" data-action="check" ${u.state === 'checking' || u.state === 'downloading' ? 'disabled' : ''}>${ic('refresh')}${u.state === 'checking' ? 'Checking' : 'Check for updates'}</button>`}</div></div>
     </div></section>
     <section class="panel"><div class="panel-head"><h2>Data</h2></div><div class="panel-body"><dl class="kv"><dt>Stored in</dt><dd class="mono">${esc(d.data_dir)}</dd><dt>Size</dt><dd>${bytes(d.size)}</dd><dt>Leaves this PC</dt><dd>Never. Only the update check talks to GitHub.</dd></dl></div></section>
   </div>`;
@@ -766,9 +768,20 @@ async function installUpdate() {
 /* ================= Render ================= */
 // Writes only when the markup changed, so a quiet refresh does not touch the page.
 function setHTML(el, html) { if (el._html !== html) { el._html = html; el.innerHTML = html; return true; } return false; }
+let loadT;
 async function render(scrollTop) {
   const gen = ++renderGen;
-  if (scrollTop) momentCache.clear();
+  render.busy = (render.busy || 0) + 1;
+  try { await renderPage(gen, scrollTop); } finally { render.busy--; }
+}
+async function renderPage(gen, scrollTop) {
+  const main = document.getElementById('main');
+  if (scrollTop) {
+    momentCache.clear();
+    // A page that takes a moment says so instead of leaving the last one up.
+    clearTimeout(loadT);
+    loadT = setTimeout(() => { if (gen === renderGen) { setHTML(main, '<div class="loading">Loading…</div>'); CHARTS.length = 0; } }, 200);
+  }
   let html;
   try {
     S.side = await invoke('sidebar');
@@ -786,16 +799,16 @@ async function render(scrollTop) {
     CHARTS.length = 0;
   }
   if (gen !== renderGen) return;
+  clearTimeout(loadT);
   renderSide();
-  const main = document.getElementById('main');
   const changed = setHTML(main, html);
   if (scrollTop) main.scrollTop = 0;
   if (changed) requestAnimationFrame(drawCharts);
-  if (!render.shown) { render.shown = true; invoke('ready').then(r => { if (r?.smoke) smokeRun(); }).catch(() => {}); }
+  if (!render.shown) { render.shown = true; invoke('ready').then(r => { if (r?.smoke && !r.hold) smokeRun(); }).catch(() => {}); }
 }
 // Live pages refresh every 5 s, unless the user is pointing at a chart, typing, or has a dialog open.
 function quietRefresh() {
-  if (S.smoke || document.hidden || S.hovering || document.getElementById('scrim').classList.contains('open')) return;
+  if (render.busy || S.smoke || document.hidden || S.hovering || document.getElementById('scrim').classList.contains('open')) return;
   const f = document.activeElement;
   if (f && (f.tagName === 'SELECT' || f.tagName === 'INPUT') && f.type !== 'checkbox') return;
   render();
@@ -829,7 +842,7 @@ document.addEventListener('click', async e => {
   if (t.hasAttribute('data-confirm')) return confirmDialog();
   if (t.hasAttribute('data-unpin')) { S.pinned = null; return render(); }
   switch (ds.action) {
-    case 'refresh': S.keys = null; momentCache.clear(); return render();
+    case 'refresh': S.keys = null; S.rescan = S.page === 'settings'; momentCache.clear(); return render();
     case 'keys-again': S.keys = null; return render();
     case 'start-recorder': await act(invoke('start_recorder'), 'Recorder started'); return setTimeout(render, 1200);
     case 'rec-start': {
@@ -872,6 +885,7 @@ let updT;
 async function pollUpdate() {
   clearTimeout(updT);
   try { S.update = await invoke('update_state'); } catch { /* keep the last state */ }
+  if (['up_to_date', 'available'].includes(S.update.state)) S.checkedAt = Date.now() / 1000;
   renderSide();
   if (['checking', 'downloading', 'restarting'].includes(S.update.state)) updT = setTimeout(pollUpdate, 800);
   else if (S.page === 'settings') render();

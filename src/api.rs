@@ -6,7 +6,10 @@ use crate::servers::{db as sdb, insights as sinsights, sshconf};
 use crate::{autostart, collector, paths, update};
 use rusqlite::Connection;
 use serde_json::{Value, json};
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::Manager;
 
 type Res = Result<Value, String>;
@@ -14,9 +17,60 @@ type Res = Result<Value, String>;
 struct App {
     /// `--smoke`: the window stays hidden, the page visits every view and reports back.
     smoke: bool,
-    local: Mutex<Connection>,
-    servers: Mutex<Connection>,
+    local: Pool,
+    servers: Pool,
     updater: update::Updater,
+    /// Findings by time range. A week of them takes seconds to work out and changes slowly.
+    findings: Mutex<HashMap<i64, (Instant, Value)>>,
+}
+
+/// SQLite connections to one database. Each command takes its own, so a slow
+/// page (a week of findings) does not hold up Settings or the sidebar.
+struct Pool {
+    path: PathBuf,
+    idle: Mutex<Vec<Connection>>,
+}
+
+impl Pool {
+    fn new(path: PathBuf, first: Connection) -> Pool {
+        Pool { path, idle: Mutex::new(vec![first]) }
+    }
+
+    fn get(&self) -> Result<Pooled<'_>, String> {
+        let conn = match self.idle.lock().unwrap().pop() {
+            Some(c) => c,
+            None => {
+                // The schema was set up by the first connection; this one only reads and writes rows.
+                let c = Connection::open(&self.path).map_err(e)?;
+                c.busy_timeout(Duration::from_secs(5)).map_err(e)?;
+                c
+            }
+        };
+        Ok(Pooled { pool: self, conn: Some(conn) })
+    }
+}
+
+struct Pooled<'a> {
+    pool: &'a Pool,
+    conn: Option<Connection>,
+}
+
+impl std::ops::Deref for Pooled<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().unwrap()
+    }
+}
+
+impl Drop for Pooled<'_> {
+    fn drop(&mut self) {
+        if let Some(c) = self.conn.take() {
+            let mut idle = self.pool.idle.lock().unwrap();
+            if idle.len() < 4 {
+                idle.push(c);
+            }
+        }
+    }
 }
 
 fn now() -> i64 {
@@ -40,12 +94,22 @@ fn bucket_for(range: i64) -> i64 {
 
 // ---------- this PC ----------
 
+fn host_name() -> String {
+    static NAME: OnceLock<String> = OnceLock::new();
+    NAME.get_or_init(|| sysinfo::System::host_name().unwrap_or_else(|| "This PC".into())).clone()
+}
+
 fn host_info() -> Value {
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    // Name, Windows version and CPU do not change while the app runs; only uptime does.
+    static FIXED: OnceLock<(String, String, usize)> = OnceLock::new();
+    let (os, cpu, cores) = FIXED.get_or_init(|| {
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        (sysinfo::System::long_os_version().unwrap_or_default(), cpu_model(), cores)
+    });
     json!({
-        "name": sysinfo::System::host_name().unwrap_or_else(|| "This PC".into()),
-        "os": sysinfo::System::long_os_version().unwrap_or_default(),
-        "cpu_model": cpu_model(),
+        "name": host_name(),
+        "os": os,
+        "cpu_model": cpu,
         "cores": cores,
         "uptime": sysinfo::System::uptime(),
     })
@@ -160,7 +224,7 @@ fn failed(status: &str) -> bool {
 }
 
 fn server_card(conn: &Connection, s: &sdb::Server) -> Result<Value, String> {
-    let host = sshconf::resolve(&s.alias);
+    let host = sshconf::lookup(&s.alias);
     let latest = sdb::latest(conn, &s.alias).map_err(e)?;
     let to = now();
     let hour = sdb::series(conn, &s.alias, to - 3_600, to, 60).map_err(e)?;
@@ -223,8 +287,8 @@ fn rank(level: &Value) -> i32 {
 
 #[tauri::command]
 async fn overview(app: tauri::State<'_, App>) -> Res {
-    let l = app.local.lock().unwrap();
-    let s = app.servers.lock().unwrap();
+    let l = app.local.get()?;
+    let s = app.servers.get()?;
     let pc = pc_summary(&l)?;
     let to = now();
     let name = pc["host"]["name"].as_str().unwrap_or("This PC").to_string();
@@ -232,7 +296,10 @@ async fn overview(app: tauri::State<'_, App>) -> Res {
     let mut cards = Vec::new();
     let on = ssh_on(&s);
     if on {
-        for srv in watched(&s)? {
+        let list = watched(&s)?;
+        // Look the addresses up together rather than one `ssh -G` after another.
+        sshconf::lookup_all(&list.iter().map(|x| x.alias.clone()).collect::<Vec<_>>());
+        for srv in list {
             if !srv.enabled {
                 cards.push(server_card(&s, &srv)?);
                 continue;
@@ -247,8 +314,8 @@ async fn overview(app: tauri::State<'_, App>) -> Res {
 
 #[tauri::command]
 async fn sidebar(app: tauri::State<'_, App>) -> Res {
-    let l = app.local.lock().unwrap();
-    let s = app.servers.lock().unwrap();
+    let l = app.local.get()?;
+    let s = app.servers.get()?;
     let latest = ldb::latest_sample(&l).map_err(e)?;
     let on = ssh_on(&s);
     let mut list = Vec::new();
@@ -264,7 +331,7 @@ async fn sidebar(app: tauri::State<'_, App>) -> Res {
     }
     Ok(json!({
         "pc": {
-            "name": sysinfo::System::host_name().unwrap_or_else(|| "This PC".into()),
+            "name": host_name(),
             "cpu": latest.as_ref().map(|(p, _)| p.cpu),
             "mem_pct": latest.as_ref().map(|(p, _)| p.mem_pct),
         },
@@ -273,12 +340,13 @@ async fn sidebar(app: tauri::State<'_, App>) -> Res {
         "recorder": collector::is_running(),
         "autostart": autostart::is_enabled(),
         "retention": ldb::setting_i64(&l, ldb::KEY_RETENTION, ldb::DEFAULT_RETENTION),
+        "version": update::CURRENT,
     }))
 }
 
 #[tauri::command]
 async fn pc_now(app: tauri::State<'_, App>) -> Res {
-    let l = app.local.lock().unwrap();
+    let l = app.local.get()?;
     let to = now();
     let recent = ldb::system_series(&l, to - 600, to, 5).map_err(e)?;
     let live = ldb::live_apps(&l).map_err(e)?;
@@ -298,7 +366,7 @@ async fn pc_now(app: tauri::State<'_, App>) -> Res {
 
 #[tauri::command]
 async fn pc_history(app: tauri::State<'_, App>, range: i64, which: Option<String>) -> Res {
-    let l = app.local.lock().unwrap();
+    let l = app.local.get()?;
     let to = now();
     let from = to - range;
     let bucket = bucket_for(range);
@@ -322,7 +390,7 @@ async fn pc_history(app: tauri::State<'_, App>, range: i64, which: Option<String
 /// The apps using the most CPU and memory around one moment of a chart.
 #[tauri::command]
 async fn pc_moment(app: tauri::State<'_, App>, ts: i64, bucket: i64) -> Res {
-    let l = app.local.lock().unwrap();
+    let l = app.local.get()?;
     let (mut from, to) = (ts - ts.rem_euclid(60), ts + bucket.max(60));
     if ldb::top_apps_in(&l, from, to, 1).map_err(e)?.is_empty() {
         from -= 120;
@@ -335,7 +403,7 @@ async fn pc_moment(app: tauri::State<'_, App>, ts: i64, bucket: i64) -> Res {
 
 #[tauri::command]
 async fn pc_apps(app: tauri::State<'_, App>, range: i64) -> Res {
-    let l = app.local.lock().unwrap();
+    let l = app.local.get()?;
     let to = now();
     let list: Vec<Value> = ldb::app_summaries(&l, to - range, to)
         .map_err(e)?
@@ -366,7 +434,7 @@ async fn stop_app(app_name: String, force: bool) -> Res {
 
 #[tauri::command]
 async fn recordings(app: tauri::State<'_, App>) -> Res {
-    let l = app.local.lock().unwrap();
+    let l = app.local.get()?;
     let list = ldb::sessions(&l, 100).map_err(e)?;
     let live = ldb::live_apps(&l).map_err(e)?;
     let mut apps: Vec<Value> = live
@@ -385,13 +453,13 @@ async fn recordings(app: tauri::State<'_, App>) -> Res {
 
 #[tauri::command]
 async fn recording_series(app: tauri::State<'_, App>, id: i64) -> Res {
-    let l = app.local.lock().unwrap();
+    let l = app.local.get()?;
     Ok(json!(ldb::session_series(&l, id, 1).map_err(e)?))
 }
 
 #[tauri::command]
 async fn start_recording(app: tauri::State<'_, App>, app_name: String, minutes: Option<i64>) -> Res {
-    let l = app.local.lock().unwrap();
+    let l = app.local.get()?;
     let id = ldb::start_session(&l, &app_name, minutes).map_err(e)?;
     let _ = collector::spawn_detached();
     Ok(json!(id))
@@ -399,24 +467,29 @@ async fn start_recording(app: tauri::State<'_, App>, app_name: String, minutes: 
 
 #[tauri::command]
 async fn stop_recording(app: tauri::State<'_, App>, id: i64) -> Res {
-    let l = app.local.lock().unwrap();
+    let l = app.local.get()?;
     ldb::end_session(&l, id, "stopped").map_err(e)?;
     Ok(Value::Null)
 }
 
 #[tauri::command]
 async fn delete_recording(app: tauri::State<'_, App>, id: i64) -> Res {
-    let l = app.local.lock().unwrap();
+    let l = app.local.get()?;
     ldb::delete_session(&l, id).map_err(e)?;
     Ok(Value::Null)
 }
 
 #[tauri::command]
 async fn findings(app: tauri::State<'_, App>, range: i64) -> Res {
-    let l = app.local.lock().unwrap();
-    let s = app.servers.lock().unwrap();
+    if let Some((at, v)) = app.findings.lock().unwrap().get(&range) {
+        if at.elapsed() < Duration::from_secs(60) {
+            return Ok(v.clone());
+        }
+    }
+    let l = app.local.get()?;
+    let s = app.servers.get()?;
     let to = now();
-    let name = sysinfo::System::host_name().unwrap_or_else(|| "This PC".into());
+    let name = host_name();
     let mut out = pc_findings(&l, to - range, to, &name);
     if ssh_on(&s) {
         for srv in watched(&s)?.into_iter().filter(|x| x.enabled) {
@@ -424,12 +497,14 @@ async fn findings(app: tauri::State<'_, App>, range: i64) -> Res {
         }
     }
     out.sort_by_key(|f| rank(&f["level"]));
-    Ok(json!(out))
+    let out = json!(out);
+    app.findings.lock().unwrap().insert(range, (Instant::now(), out.clone()));
+    Ok(out)
 }
 
 #[tauri::command]
 async fn server_detail(app: tauri::State<'_, App>, alias: String) -> Res {
-    let s = app.servers.lock().unwrap();
+    let s = app.servers.get()?;
     let srv = sdb::servers(&s).map_err(e)?.into_iter().find(|x| x.alias == alias).ok_or("This host is no longer in ~/.ssh/config.")?;
     let to = now();
     let mut card = server_card(&s, &srv)?;
@@ -445,13 +520,13 @@ async fn server_detail(app: tauri::State<'_, App>, alias: String) -> Res {
     );
     card["recent"] = json!(sdb::series(&s, &alias, to - 600, to, 5).map_err(e)?);
     card["findings"] = json!(server_findings(&s, &srv, to - 86_400, to));
-    card["key"] = json!(sshconf::resolve(&alias).identity_files.first().cloned().unwrap_or_default());
+    card["key"] = json!(sshconf::lookup(&alias).identity_files.first().cloned().unwrap_or_default());
     Ok(card)
 }
 
 #[tauri::command]
 async fn server_history(app: tauri::State<'_, App>, alias: String, range: i64) -> Res {
-    let s = app.servers.lock().unwrap();
+    let s = app.servers.get()?;
     let to = now();
     let bucket = bucket_for(range);
     let pts = sdb::series(&s, &alias, to - range, to, bucket).map_err(e)?;
@@ -464,7 +539,7 @@ async fn server_history(app: tauri::State<'_, App>, alias: String, range: i64) -
 
 #[tauri::command]
 async fn server_moment(app: tauri::State<'_, App>, alias: String, ts: i64, bucket: i64) -> Res {
-    let s = app.servers.lock().unwrap();
+    let s = app.servers.get()?;
     let (mut from, to) = (ts - ts.rem_euclid(60), ts + bucket.max(60));
     if sdb::minutes_recorded(&s, &alias, from, to).map_err(e)? == 0 {
         from -= 120;
@@ -480,7 +555,8 @@ async fn server_moment(app: tauri::State<'_, App>, alias: String, ts: i64, bucke
 
 #[tauri::command]
 async fn server_retry(app: tauri::State<'_, App>, alias: Option<String>) -> Res {
-    let s = app.servers.lock().unwrap();
+    app.findings.lock().unwrap().clear();
+    let s = app.servers.get()?;
     match alias {
         Some(a) => sdb::bump_server_retry(&s, &a).map_err(e)?,
         None => sdb::bump_retry(&s).map_err(e)?,
@@ -491,7 +567,8 @@ async fn server_retry(app: tauri::State<'_, App>, alias: Option<String>) -> Res 
 
 #[tauri::command]
 async fn server_watch(app: tauri::State<'_, App>, alias: String, on: bool) -> Res {
-    let s = app.servers.lock().unwrap();
+    app.findings.lock().unwrap().clear();
+    let s = app.servers.get()?;
     sdb::ensure_servers(&s, std::slice::from_ref(&alias)).map_err(e)?;
     sdb::set_enabled(&s, &alias, on).map_err(e)?;
     Ok(Value::Null)
@@ -504,16 +581,18 @@ async fn ssh_keys() -> Res {
 }
 
 #[tauri::command]
-async fn settings(app: tauri::State<'_, App>) -> Res {
-    let l = app.local.lock().unwrap();
-    let s = app.servers.lock().unwrap();
+async fn settings(app: tauri::State<'_, App>, rescan: Option<bool>) -> Res {
+    if rescan == Some(true) {
+        sshconf::forget();
+    }
+    let l = app.local.get()?;
+    let s = app.servers.get()?;
     let known: Vec<sdb::Server> = sdb::servers(&s).map_err(e)?;
-    let hosts: Vec<Value> = sshconf::aliases()
-        .iter()
-        .map(|a| {
-            let h = sshconf::resolve(a);
-            let enabled = known.iter().find(|k| &k.alias == a).is_none_or(|k| k.enabled);
-            json!({ "alias": a, "address": h.address(), "via": h.proxy_jump, "enabled": enabled })
+    let hosts: Vec<Value> = sshconf::lookup_all(&sshconf::aliases())
+        .into_iter()
+        .map(|h| {
+            let enabled = known.iter().find(|k| k.alias == h.alias).is_none_or(|k| k.enabled);
+            json!({ "alias": h.alias, "address": h.address(), "via": h.proxy_jump, "enabled": enabled })
         })
         .collect();
     let size: u64 = [paths::local_db(), paths::servers_db()].iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
@@ -534,7 +613,8 @@ async fn settings(app: tauri::State<'_, App>) -> Res {
 
 #[tauri::command]
 async fn set_ssh(app: tauri::State<'_, App>, on: bool) -> Res {
-    let s = app.servers.lock().unwrap();
+    app.findings.lock().unwrap().clear();
+    let s = app.servers.get()?;
     sdb::set_setting(&s, sdb::KEY_MONITORING, if on { "1" } else { "0" }).map_err(e)?;
     if on {
         sdb::ensure_servers(&s, &sshconf::aliases()).map_err(e)?;
@@ -552,15 +632,15 @@ async fn set_autostart(on: bool) -> Res {
 #[tauri::command]
 async fn set_retention(app: tauri::State<'_, App>, days: i64) -> Res {
     let days = days.clamp(1, 365).to_string();
-    ldb::set_setting(&app.local.lock().unwrap(), ldb::KEY_RETENTION, &days).map_err(e)?;
-    sdb::set_setting(&app.servers.lock().unwrap(), sdb::KEY_RETENTION, &days).map_err(e)?;
+    ldb::set_setting(&*app.local.get()?, ldb::KEY_RETENTION, &days).map_err(e)?;
+    sdb::set_setting(&*app.servers.get()?, sdb::KEY_RETENTION, &days).map_err(e)?;
     Ok(Value::Null)
 }
 
 #[tauri::command]
 async fn set_theme(app: tauri::State<'_, App>, theme: String) -> Res {
     let theme = if matches!(theme.as_str(), "light" | "dark") { theme } else { "system".into() };
-    ldb::set_setting(&app.local.lock().unwrap(), "theme", &theme).map_err(e)?;
+    ldb::set_setting(&*app.local.get()?, "theme", &theme).map_err(e)?;
     Ok(Value::Null)
 }
 
@@ -606,7 +686,8 @@ async fn ready(app: tauri::State<'_, App>, window: tauri::WebviewWindow) -> Res 
         let _ = window.show();
         let _ = window.set_focus();
     }
-    Ok(json!({ "smoke": app.smoke }))
+    // JPU_SMOKE_HOLD=<port> keeps a hidden smoke window idle so a test can drive it over the WebView2 debug port.
+    Ok(json!({ "smoke": app.smoke, "hold": app.smoke && std::env::var_os("JPU_SMOKE_HOLD").is_some() }))
 }
 
 #[tauri::command]
@@ -626,17 +707,33 @@ fn quit(handle: tauri::AppHandle) {
 pub fn run(smoke: bool) -> Result<(), String> {
     let local = ldb::open(&paths::local_db()).map_err(e)?;
     let servers = sdb::open(&paths::servers_db()).map_err(e)?;
-    let state = App { smoke, local: Mutex::new(local), servers: Mutex::new(servers), updater: update::Updater::default() };
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    let state = App {
+        smoke,
+        local: Pool::new(paths::local_db(), local),
+        servers: Pool::new(paths::servers_db(), servers),
+        updater: update::Updater::default(),
+        findings: Mutex::default(),
+    };
+    let mut builder = tauri::Builder::default();
+    // A hidden smoke run must not hand off to (or block) the window the user has open.
+    if !smoke {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.unminimize();
                 let _ = w.show();
                 let _ = w.set_focus();
             }
-        }))
+        }));
+    }
+    builder
         .manage(state)
         .setup(move |app| {
+            let mut window = tauri::WebviewWindowBuilder::from_config(app.handle(), &app.config().app.windows[0])?;
+            // A held smoke run opens the WebView2 debug port so a test can click through the hidden window.
+            if let Some(port) = std::env::var("JPU_SMOKE_HOLD").ok().filter(|_| smoke) {
+                window = window.additional_browser_args(&format!("--remote-debugging-port={port}"));
+            }
+            window.build()?;
             // Show the window even if the page never calls ready(); a smoke run gives up after 3 minutes instead.
             let handle = app.handle().clone();
             std::thread::spawn(move || {
