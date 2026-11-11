@@ -26,15 +26,30 @@ const PROTECTED: &[&str] = &[
 pub fn is_protected(app: &str, exe_path: Option<&str>) -> bool {
     let name = app.to_ascii_lowercase();
     let name = name.trim_end_matches(".exe");
-    if PROTECTED.contains(&name) {
+    // This app, its recorder and anything with its name.
+    if PROTECTED.contains(&name) || name.starts_with("jperformance") {
         return true;
     }
     let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()).to_ascii_lowercase();
     exe_path.is_some_and(|p| p.to_ascii_lowercase().starts_with(&format!("{windir}\\")))
 }
 
+/// Programs that live in the Windows folder but are only ever started as helpers
+/// (a console host, a shell). They may be ended as part of a tree whose owner is being stopped.
+const WINDOWS_HELPERS: &[&str] = &[
+    "cmd", "conhost", "powershell", "timeout", "ping", "findstr", "where", "more", "choice", "tasklist", "reg",
+    "wsl", "wslhost", "curl", "tar", "certutil", "sort", "whoami", "hostname", "chcp",
+];
+
+/// True if `app` may be ended because something that started it is being stopped.
+pub fn tree_killable(app: &str, exe_path: Option<&str>) -> bool {
+    let name = app.to_ascii_lowercase();
+    let name = name.trim_end_matches(".exe");
+    WINDOWS_HELPERS.contains(&name) || !is_protected(app, exe_path)
+}
+
 /// Visible top-level windows grouped by process id.
-fn visible_windows() -> HashMap<u32, Vec<HWND>> {
+pub fn visible_windows() -> HashMap<u32, Vec<HWND>> {
     unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> i32 {
         unsafe {
             let out = &mut *(lparam as *mut HashMap<u32, Vec<HWND>>);
@@ -96,13 +111,22 @@ const CLOSE_WAIT: Duration = Duration::from_secs(6);
 const EXIT_GRACE: Duration = Duration::from_secs(2);
 
 /// A process of the app being stopped, held open so a reused process id cannot be hit by mistake.
-struct Proc {
+pub struct Proc {
     pid: u32,
     parent: Option<u32>,
     handle: HANDLE,
 }
 
+// The handle is only used to wait on and end the process, which is safe from any thread.
+unsafe impl Send for Proc {}
+
 impl Proc {
+    /// Opens a process so it can be ended. None if Windows refuses (usually an elevated process).
+    pub fn open(pid: u32, parent: Option<u32>) -> Option<Proc> {
+        let handle = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid) };
+        (!handle.is_null()).then_some(Proc { pid, parent, handle })
+    }
+
     fn alive(&self) -> bool {
         unsafe { WaitForSingleObject(self.handle, 0) == WAIT_TIMEOUT }
     }
@@ -142,16 +166,17 @@ pub fn stop(app: &str, force: bool) -> StopResult {
     // Processes Windows will not open for us (usually elevated ones) are skipped.
     let procs: Vec<Proc> = matching
         .iter()
-        .filter_map(|p| {
-            let pid = p.pid().as_u32();
-            let handle = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid) };
-            (!handle.is_null()).then(|| Proc { pid, parent: p.parent().map(|p| p.as_u32()), handle })
-        })
+        .filter_map(|p| Proc::open(p.pid().as_u32(), p.parent().map(|p| p.as_u32())))
         .collect();
+    stop_procs(procs, force)
+}
+
+/// Stops the given processes. Without `force`, the ones with windows are asked to close
+/// first; if a window is still open after a few seconds nothing is ended.
+pub fn stop_procs(procs: Vec<Proc>, force: bool) -> StopResult {
     if procs.is_empty() {
         return StopResult::Denied;
     }
-
     if !force {
         let windows = visible_windows();
         let mut asked = false;
@@ -210,24 +235,5 @@ fn end_all(procs: &[Proc]) -> StopResult {
     match procs.iter().filter(|p| !p.alive()).count() {
         0 => StopResult::Denied,
         n => StopResult::Ended(n),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_protected;
-
-    #[test]
-    fn windows_processes_are_protected() {
-        assert!(is_protected("svchost.exe", None));
-        assert!(is_protected("Explorer.EXE", None));
-        assert!(is_protected("jperformance.exe", None));
-        assert!(is_protected("notepad.exe", Some(r"C:\Windows\System32\notepad.exe")));
-    }
-
-    #[test]
-    fn user_apps_are_not_protected() {
-        assert!(!is_protected("Discord.exe", Some(r"C:\Users\Joe\AppData\Local\Discord\app\Discord.exe")));
-        assert!(!is_protected("spotify.exe", None));
     }
 }

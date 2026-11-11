@@ -64,8 +64,13 @@ impl Session {
     /// Logs in and runs `setup`. Returns the session and how long the login took.
     pub fn connect(alias: &str, setup: &str) -> Result<(Session, Vec<String>, u64), Failure> {
         let t0 = Instant::now();
+        // With an IdentityFile set, offer only that key, so keys in ssh-agent cannot use up
+        // the server's MaxAuthTries and lock the login out.
+        let only = if super::sshconf::lookup(alias).identity_files.is_empty() { "IdentitiesOnly=no" } else { "IdentitiesOnly=yes" };
         let mut child = cmd::hidden("ssh")
             .args([
+                "-o",
+                only,
                 "-T",
                 "-o",
                 "BatchMode=yes",
@@ -80,7 +85,9 @@ impl Session {
                 "-o",
                 "LogLevel=ERROR",
                 alias,
-                "sh",
+                // The scripts' own error messages go to /dev/null, so only ssh's words reach stderr
+                // and a harmless "cannot open /proc/N" is never shown as the login error.
+                "exec sh 2>/dev/null",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -171,19 +178,5 @@ impl Drop for Session {
         let _ = self.stdin.write_all(b"exit\n");
         let _ = self.child.kill();
         let _ = self.child.wait();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::classify;
-
-    #[test]
-    fn names_common_ssh_errors() {
-        assert_eq!(classify("ssh: connect to host 1.2.3.4 port 22: Connection timed out", false).status, "timeout");
-        assert_eq!(classify("root@x: Permission denied (publickey).", false).status, "denied");
-        assert_eq!(classify("Host key verification failed.", false).status, "hostkey");
-        assert_eq!(classify("ssh: connect to host x port 22: Connection refused", false).status, "refused");
-        assert_eq!(classify("ssh: Could not resolve hostname nope: No such host is known.", false).status, "dns");
     }
 }

@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS live_apps (
     procs    INTEGER NOT NULL,
     ts       INTEGER NOT NULL,
     last_active INTEGER NOT NULL DEFAULT 0,
-    titles   TEXT
+    titles   TEXT,
+    private  INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
@@ -64,6 +65,28 @@ CREATE TABLE IF NOT EXISTS session_samples (
     procs      INTEGER NOT NULL,
     PRIMARY KEY (session_id, ts)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS proc_activity (
+    pid       INTEGER NOT NULL,
+    started   INTEGER NOT NULL,
+    active_at INTEGER NOT NULL,
+    PRIMARY KEY (pid, started)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS cleanup_log (
+    id     INTEGER PRIMARY KEY,
+    ts     INTEGER NOT NULL,
+    name   TEXT    NOT NULL,
+    procs  INTEGER NOT NULL,
+    mem    INTEGER NOT NULL,
+    reason TEXT    NOT NULL,
+    auto   INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS storage_cleans (
+    id    INTEGER PRIMARY KEY,
+    ts    INTEGER NOT NULL,
+    what  TEXT    NOT NULL,
+    freed INTEGER NOT NULL,
+    files INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS collector_status (
     id        INTEGER PRIMARY KEY CHECK (id = 1),
     pid       INTEGER NOT NULL,
@@ -74,7 +97,7 @@ CREATE TABLE IF NOT EXISTS collector_status (
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.busy_timeout(std::time::Duration::from_secs(15))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.execute_batch(SCHEMA)?;
@@ -90,14 +113,15 @@ fn migrate(conn: &Connection) -> Result<()> {
         .collect::<Result<_>>()?;
     // live_apps only holds the latest sample, so it can be rebuilt freely.
     let live_ok = conn
-        .prepare("SELECT 1 FROM pragma_table_info('live_apps') WHERE name = 'titles'")?
+        .prepare("SELECT 1 FROM pragma_table_info('live_apps') WHERE name = 'private'")?
         .exists([])?;
     if !live_ok {
         conn.execute_batch(
             "DROP TABLE live_apps;
              CREATE TABLE live_apps (
                 app TEXT PRIMARY KEY, cpu REAL NOT NULL, mem INTEGER NOT NULL, io_rate REAL NOT NULL,
-                procs INTEGER NOT NULL, ts INTEGER NOT NULL, last_active INTEGER NOT NULL DEFAULT 0, titles TEXT);",
+                procs INTEGER NOT NULL, ts INTEGER NOT NULL, last_active INTEGER NOT NULL DEFAULT 0, titles TEXT,
+                private INTEGER NOT NULL DEFAULT 0);",
         )?;
     }
     let has_title = conn
@@ -123,7 +147,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     if !has_planned {
         conn.execute_batch("ALTER TABLE sessions ADD COLUMN planned_end INTEGER")?;
     }
-    for col in ["proc_count", "app_count"] {
+    for col in ["proc_count", "app_count", "commit_used", "commit_total"] {
         if !cols.iter().any(|c| c == col) {
             conn.execute_batch(&format!(
                 "ALTER TABLE system_samples ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"
@@ -161,6 +185,10 @@ pub const KEY_TRACKING: &str = "tracking_enabled";
 pub const KEY_INTERVAL: &str = "sample_interval_secs";
 pub const KEY_RETENTION: &str = "retention_days";
 
+pub const KEY_AUTO_CLEANUP: &str = "auto_cleanup";
+pub const KEY_AUTO_CLEANUP_MIN: &str = "auto_cleanup_minutes";
+pub const DEFAULT_AUTO_CLEANUP_MIN: i64 = 15;
+
 pub const DEFAULT_INTERVAL: i64 = 5;
 pub const DEFAULT_RETENTION: i64 = 30;
 
@@ -171,6 +199,9 @@ pub fn tracking_enabled(conn: &Connection) -> bool {
 // ---------- collector writes ----------
 
 pub struct SystemSample {
+    /// Memory promised to programs (RAM plus page file) and the most Windows can promise.
+    pub commit_used: u64,
+    pub commit_total: u64,
     pub ts: i64,
     pub cpu: f64,
     pub mem_used: u64,
@@ -202,14 +233,16 @@ pub struct LiveApp {
     pub procs: i64,
     /// Taskbar window titles, joined with " | ".
     pub titles: Option<String>,
+    /// Memory the app has been promised and cannot be shared (private bytes).
+    pub private: u64,
 }
 
 pub fn write_sample(conn: &mut Connection, s: &SystemSample, live: &[LiveApp]) -> Result<()> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     tx.execute(
         "INSERT OR REPLACE INTO system_samples
-         (ts, cpu, mem_used, mem_total, io_read, io_write, net_rx, net_tx, interval_ms, proc_count, app_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+         (ts, cpu, mem_used, mem_total, io_read, io_write, net_rx, net_tx, interval_ms, proc_count, app_count, commit_used, commit_total)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             s.ts,
             s.cpu,
@@ -221,16 +254,18 @@ pub fn write_sample(conn: &mut Connection, s: &SystemSample, live: &[LiveApp]) -
             s.net_tx as i64,
             s.interval_ms,
             s.proc_count,
-            s.app_count
+            s.app_count,
+            s.commit_used as i64,
+            s.commit_total as i64
         ],
     )?;
     tx.execute("DELETE FROM live_apps", [])?;
     {
         let mut stmt = tx.prepare(
-            "INSERT INTO live_apps(app, cpu, mem, io_rate, procs, ts, titles) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO live_apps(app, cpu, mem, io_rate, procs, ts, titles, private) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?;
         for a in live {
-            stmt.execute(params![a.app, a.cpu, a.mem as i64, a.io_rate, a.procs, s.ts, a.titles])?;
+            stmt.execute(params![a.app, a.cpu, a.mem as i64, a.io_rate, a.procs, s.ts, a.titles, a.private as i64])?;
         }
     }
     tx.execute(
@@ -241,7 +276,7 @@ pub fn write_sample(conn: &mut Connection, s: &SystemSample, live: &[LiveApp]) -
 }
 
 pub fn write_minute(conn: &mut Connection, minute: i64, rows: &[AppMinute]) -> Result<()> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     {
         let mut stmt = tx.prepare(
             "INSERT OR REPLACE INTO app_minutes
@@ -293,7 +328,71 @@ pub fn mark_collector_started(conn: &Connection, pid: u32, ts: i64) -> Result<()
 pub fn prune(conn: &Connection, older_than: i64) -> Result<usize> {
     let a = conn.execute("DELETE FROM system_samples WHERE ts < ?1", [older_than])?;
     let b = conn.execute("DELETE FROM app_minutes WHERE minute < ?1", [older_than])?;
-    Ok(a + b)
+    let c = conn.execute("DELETE FROM cleanup_log WHERE ts < ?1", [older_than])?;
+    Ok(a + b + c)
+}
+
+// ---------- process activity and clean-up ----------
+
+/// Replaces the table of when each running process last used the CPU.
+pub fn write_activity(conn: &mut Connection, rows: &[(u32, i64, i64)]) -> Result<()> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute("DELETE FROM proc_activity", [])?;
+    {
+        let mut stmt = tx.prepare("INSERT OR REPLACE INTO proc_activity(pid, started, active_at) VALUES (?1, ?2, ?3)")?;
+        for (pid, started, at) in rows {
+            stmt.execute(params![pid, started, at])?;
+        }
+    }
+    tx.commit()
+}
+
+/// When each process (pid, start time) last used the CPU.
+pub fn activity(conn: &Connection) -> Result<std::collections::HashMap<(u32, i64), i64>> {
+    let mut stmt = conn.prepare("SELECT pid, started, active_at FROM proc_activity")?;
+    let rows = stmt.query_map([], |r| Ok(((r.get::<_, u32>(0)?, r.get::<_, i64>(1)?), r.get::<_, i64>(2)?)))?;
+    rows.collect()
+}
+
+pub fn log_cleanup(conn: &Connection, ts: i64, name: &str, procs: usize, mem: u64, reason: &str, auto: bool) -> Result<()> {
+    conn.execute(
+        "INSERT INTO cleanup_log(ts, name, procs, mem, reason, auto) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![ts, name, procs as i64, mem as i64, reason, auto as i64],
+    )?;
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+pub struct CleanupEntry {
+    pub ts: i64,
+    pub name: String,
+    pub procs: i64,
+    pub mem: i64,
+    pub reason: String,
+    pub auto: bool,
+}
+
+pub fn cleanup_log(conn: &Connection, limit: usize) -> Result<Vec<CleanupEntry>> {
+    let mut stmt = conn.prepare("SELECT ts, name, procs, mem, reason, auto FROM cleanup_log ORDER BY ts DESC, id DESC LIMIT ?1")?;
+    let rows = stmt.query_map([limit as i64], |r| {
+        Ok(CleanupEntry { ts: r.get(0)?, name: r.get(1)?, procs: r.get(2)?, mem: r.get(3)?, reason: r.get(4)?, auto: r.get::<_, i64>(5)? != 0 })
+    })?;
+    rows.collect()
+}
+
+/// Notes disk space freed by clearing caches or emptying the Recycle Bin.
+pub fn log_storage_clean(conn: &Connection, ts: i64, what: &str, freed: u64, files: u64) -> Result<()> {
+    conn.execute("INSERT INTO storage_cleans(ts, what, freed, files) VALUES (?1, ?2, ?3, ?4)", params![ts, what, freed as i64, files as i64])?;
+    Ok(())
+}
+
+/// Disk space freed so far: (bytes in all, how many times, when last, what last, bytes last).
+pub fn storage_clean_stats(conn: &Connection) -> Result<(i64, i64, Option<(i64, String, i64)>)> {
+    let (total, n): (i64, i64) = conn.query_row("SELECT COALESCE(SUM(freed), 0), COUNT(*) FROM storage_cleans", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let last = conn
+        .query_row("SELECT ts, what, freed FROM storage_cleans ORDER BY ts DESC, id DESC LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .optional()?;
+    Ok((total, n, last))
 }
 
 // ---------- reads ----------
@@ -313,6 +412,8 @@ pub struct SysPoint {
     pub procs: f64,
     /// distinct apps running; 0 when not recorded
     pub apps: f64,
+    /// share of the commit limit in use; 0 when not recorded
+    pub commit_pct: f64,
 }
 
 /// System samples between `from` and `to`, averaged into `bucket`-second buckets.
@@ -324,7 +425,8 @@ pub fn system_series(conn: &Connection, from: i64, to: i64, bucket: i64) -> Resu
                 AVG(100.0 * mem_used / mem_total), AVG(mem_used),
                 1000.0 * SUM(io_read + io_write) / SUM(interval_ms),
                 1000.0 * SUM(net_rx + net_tx) / SUM(interval_ms),
-                COALESCE(AVG(NULLIF(proc_count, 0)), 0), COALESCE(AVG(NULLIF(app_count, 0)), 0)
+                COALESCE(AVG(NULLIF(proc_count, 0)), 0), COALESCE(AVG(NULLIF(app_count, 0)), 0),
+                COALESCE(AVG(CASE WHEN commit_total > 0 THEN 100.0 * commit_used / commit_total END), 0)
          FROM system_samples
          WHERE ts >= ?1 AND ts <= ?2 AND mem_total > 0 AND interval_ms > 0
          GROUP BY b ORDER BY b",
@@ -340,6 +442,7 @@ pub fn system_series(conn: &Connection, from: i64, to: i64, bucket: i64) -> Resu
             net_rate: r.get(6)?,
             procs: r.get(7)?,
             apps: r.get(8)?,
+            commit_pct: r.get(9)?,
         })
     })?;
     rows.collect()
@@ -349,7 +452,8 @@ pub fn latest_sample(conn: &Connection) -> Result<Option<(SysPoint, u64)>> {
     conn.query_row(
         "SELECT ts, cpu, 100.0 * mem_used / mem_total, mem_used, mem_total,
                 1000.0 * (io_read + io_write) / interval_ms,
-                1000.0 * (net_rx + net_tx) / interval_ms, proc_count, app_count
+                1000.0 * (net_rx + net_tx) / interval_ms, proc_count, app_count,
+                CASE WHEN commit_total > 0 THEN 100.0 * commit_used / commit_total ELSE 0 END
          FROM system_samples WHERE mem_total > 0 AND interval_ms > 0
          ORDER BY ts DESC LIMIT 1",
         [],
@@ -368,6 +472,7 @@ pub fn latest_sample(conn: &Connection) -> Result<Option<(SysPoint, u64)>> {
                     net_rate: r.get(6)?,
                     procs: r.get::<_, i64>(7)? as f64,
                     apps: r.get::<_, i64>(8)? as f64,
+                    commit_pct: r.get(9)?,
                 },
                 mem_total as u64,
             ))
@@ -387,11 +492,12 @@ pub struct LiveRow {
     pub exe_path: Option<String>,
     /// Taskbar window titles right now, joined with " | ".
     pub titles: Option<String>,
+    pub private: u64,
 }
 
 pub fn live_apps(conn: &Connection) -> Result<Vec<LiveRow>> {
     let mut stmt = conn.prepare(
-        "SELECT l.app, a.description, l.cpu, l.mem, l.io_rate, l.procs, a.exe_path, l.titles
+        "SELECT l.app, a.description, l.cpu, l.mem, l.io_rate, l.procs, a.exe_path, l.titles, l.private
          FROM live_apps l LEFT JOIN app_names a ON a.app = l.app
          ORDER BY l.cpu DESC, l.mem DESC",
     )?;
@@ -405,6 +511,7 @@ pub fn live_apps(conn: &Connection) -> Result<Vec<LiveRow>> {
             procs: r.get(5)?,
             exe_path: r.get(6)?,
             titles: r.get(7)?,
+            private: r.get::<_, i64>(8)? as u64,
         })
     })?;
     rows.collect()
@@ -635,7 +742,7 @@ pub struct SessionSample {
 }
 
 pub fn write_session_samples(conn: &mut Connection, rows: &[(i64, SessionSample)]) -> Result<()> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     {
         let mut stmt = tx.prepare(
             "INSERT OR REPLACE INTO session_samples(session_id, ts, cpu, mem, io_rate, procs) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",

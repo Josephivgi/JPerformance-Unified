@@ -1,7 +1,7 @@
 //! Background collector. Runs as `JPerformance.exe --collector`, samples the whole
 //! system every few seconds and rolls per-app usage up into one row per minute.
 
-use super::{db, describe, procs};
+use super::{db, describe, procs, tree};
 use crate::paths;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,6 +28,7 @@ struct Acc {
 struct Now {
     cpu: f64,
     mem: u64,
+    private: u64,
     io: u64,
     procs: i64,
 }
@@ -50,7 +51,9 @@ pub fn run(stop: &AtomicBool) -> Result<(), String> {
         .with_cpu()
         .with_memory()
         .with_disk_usage()
-        .with_exe(UpdateKind::OnlyIfNotSet);
+        .with_exe(UpdateKind::OnlyIfNotSet)
+        // Read once per process, so automatic clean-up can tell a dev server from a leftover helper.
+        .with_cmd(UpdateKind::OnlyIfNotSet);
     sys.refresh_cpu_usage();
     sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
     let mut last = Instant::now();
@@ -65,6 +68,10 @@ pub fn run(stop: &AtomicBool) -> Result<(), String> {
     let mut last_prune = Instant::now() - Duration::from_secs(3600);
     let mut last_settings_check = Instant::now();
     let mut interval = db::setting_i64(&conn, db::KEY_INTERVAL, db::DEFAULT_INTERVAL).clamp(1, 60);
+    // When each process last used the CPU, by (pid, start time), so idle sessions and left-over helpers can be found.
+    let mut activity: HashMap<(u32, i64), (u64, i64)> = HashMap::new();
+    let mut last_activity_write = Instant::now();
+    let my_session = tree::my_session();
 
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -102,6 +109,8 @@ pub fn run(stop: &AtomicBool) -> Result<(), String> {
             let e = apps.entry(name.clone()).or_default();
             e.cpu += p.cpu_usage() as f64 / cores;
             e.mem += p.memory();
+            // On Windows this is the process's private bytes (its share of the commit charge).
+            e.private += p.virtual_memory();
             e.io += du.read_bytes + du.written_bytes;
             e.procs += 1;
 
@@ -116,11 +125,40 @@ pub fn run(stop: &AtomicBool) -> Result<(), String> {
             }
         }
 
+        // A process counts as active when it used more than 0.5% of one core since the last sample.
+        let busy_ms = (elapsed_ms as u64 / 200).max(5);
+        let mut alive: HashSet<(u32, i64)> = HashSet::with_capacity(activity.len());
+        for (pid, p) in sys.processes() {
+            let key = (pid.as_u32(), p.start_time() as i64);
+            let cpu_ms = p.accumulated_cpu_time();
+            alive.insert(key);
+            let e = activity.entry(key).or_insert((cpu_ms, ts));
+            if cpu_ms.saturating_sub(e.0) > busy_ms {
+                e.1 = ts;
+            }
+            e.0 = cpu_ms;
+        }
+        activity.retain(|k, _| alive.contains(k));
+        if last_activity_write.elapsed() >= Duration::from_secs(60) {
+            last_activity_write = Instant::now();
+            let rows: Vec<(u32, i64, i64)> = activity.iter().map(|(&(pid, st), &(_, at))| (pid, st, at)).collect();
+            if let Err(e) = db::write_activity(&mut conn, &rows) {
+                log(&format!("write_activity failed: {e}"));
+            }
+            if db::setting_i64(&conn, db::KEY_AUTO_CLEANUP, 0) != 0 {
+                let idle_for = db::setting_i64(&conn, db::KEY_AUTO_CLEANUP_MIN, db::DEFAULT_AUTO_CLEANUP_MIN).max(1) * 60;
+                auto_cleanup(&conn, &sys, cores, &activity, ts, idle_for, my_session);
+            }
+        }
+
         let (net_rx, net_tx) = nets
             .iter()
             .fold((0u64, 0u64), |(r, t), (_, n)| (r + n.received(), t + n.transmitted()));
 
+        let (commit_used, commit_total) = commit_charge();
         let sample = db::SystemSample {
+            commit_used,
+            commit_total,
             ts,
             cpu: sys.global_cpu_usage() as f64,
             mem_used: sys.used_memory(),
@@ -166,6 +204,7 @@ pub fn run(stop: &AtomicBool) -> Result<(), String> {
                 io_rate: n.io as f64 * 1000.0 / elapsed_ms as f64,
                 procs: n.procs,
                 titles: titles.get(name).map(|t| t.join(" | ").chars().take(400).collect()),
+                private: n.private,
             })
             .collect();
 
@@ -213,6 +252,40 @@ pub fn run(stop: &AtomicBool) -> Result<(), String> {
         flush_minute(&mut conn, m, &minute_acc, minute_samples);
     }
     Ok(())
+}
+
+/// Memory promised to programs and the most Windows can promise (RAM plus page file).
+/// When the two meet, programs fail to start or crash even if RAM looks free.
+pub fn commit_charge() -> (u64, u64) {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut m) } == 0 {
+        return (0, 0);
+    }
+    (m.ullTotalPageFile.saturating_sub(m.ullAvailPageFile), m.ullTotalPageFile)
+}
+
+/// Ends helpers (node, python, shells) that were left running after the program that
+/// started them closed, once they have been idle for `idle_for` seconds. Only the user's own session.
+fn auto_cleanup(conn: &rusqlite::Connection, sys: &System, cores: f64, activity: &HashMap<(u32, i64), (u64, i64)>, ts: i64, idle_for: i64, session: Option<u32>) {
+    let act: HashMap<(u32, i64), i64> = activity.iter().map(|(k, v)| (*k, v.1)).collect();
+    let t = tree::Tree::build(sys, cores, &act, ts);
+    let targets: Vec<(u32, i64)> = t
+        .suggestions(session)
+        .into_iter()
+        .filter(|s| s.kind == "orphan" && s.checked && s.sum.idle >= idle_for)
+        .map(|s| (s.pid, s.started))
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    for r in tree::stop_trees(&t, &targets, true) {
+        if let procs::StopResult::Ended(n) = r.result {
+            log(&format!("auto clean-up ended {} ({n} processes)", r.name));
+            let _ = db::log_cleanup(conn, ts, &r.name, n, r.mem, "Left running after the program that started it closed", true);
+        }
+    }
 }
 
 fn flush_minute(conn: &mut rusqlite::Connection, minute: i64, acc: &HashMap<String, Acc>, samples: u32) {

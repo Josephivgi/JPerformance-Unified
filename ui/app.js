@@ -22,7 +22,13 @@ const I = {
   search: '<circle cx="7" cy="7" r="4.6"/><path d="m10.5 10.5 3.3 3.3"/>',
   x: '<path d="m4 4 8 8M12 4l-8 8"/>',
   shield: '<path d="M8 1.8 13.2 3.8v4c0 3-2.2 5.3-5.2 6.4-3-1.1-5.2-3.4-5.2-6.4v-4z"/><path d="m5.8 8 1.6 1.6 2.9-3"/>',
+  broom: '<path d="M10.5 1.8 7.4 7.2"/><path d="M4.2 7.4h6.4l1.2 6.8H3z"/><path d="M6 10.2v4M8.4 10.2v4"/>',
   download: '<path d="M8 2.2v8M4.6 7l3.4 3.4L11.4 7M2.6 13.6h10.8"/>',
+  disk: '<rect x="1.8" y="4" width="12.4" height="8" rx="1.4"/><path d="M4.4 9.5h4M11.2 9.5h.1"/>',
+  folder: '<path d="M1.8 4.2c0-.7.5-1.2 1.2-1.2h3l1.4 1.6H13c.7 0 1.2.5 1.2 1.2v6.2c0 .7-.5 1.2-1.2 1.2H3c-.7 0-1.2-.5-1.2-1.2z"/>',
+  'arrow-up': '<path d="M8 13.5v-11M3.8 6.7 8 2.5l4.2 4.2"/>',
+  'sort-down': '<path d="M8 3v10M4.5 9.5 8 13l3.5-3.5"/>',
+  'sort-up': '<path d="M8 13V3M4.5 6.5 8 3l3.5 3.5"/>',
 };
 const ic = (n, cls = 'i') => `<svg class="${cls}" viewBox="0 0 16 16">${I[n]}</svg>`;
 
@@ -76,7 +82,11 @@ const S = {
   page: 'overview', machine: null, tab: 'now', range: 86400, sort: 'cpu', appSel: null,
   histApp: '', pinned: null, filter: 'all', srvKind: 'all', recSel: null, recMinutes: 30,
   asked: new Set(), side: null, update: { state: 'idle' }, theme: 'system',
+  cleanSel: new Set(), cleanSeen: new Set(), openGroups: new Set(), runQuery: '',
+  stSel: new Map(), stJunk: new Set(), apQ: '', apAll: false, stView: 'biggest', stBSort: 'size', stBDesc: true, stBN: 200, stDir: 0, stSort: 'size', stDesc: true, stFSort: 'size', stFDesc: true, stType: '', stFQ: '', stFN: 200, stRoot: null, stPerm: false, stDupN: 100,
+  stJunkOpen: new Set(), stJunkAll: new Set(), stCleanMsg: null, stDlDays: 90, stDlN: 50, stDlLast: null, stBuildDays: 30,
 };
+const key2 = (pid, started) => pid + ':' + started;
 let renderGen = 0;
 
 function go(page, machine, tab) {
@@ -118,8 +128,8 @@ function head(title, sub, actions = '', tabs = null) {
 
 const LEVEL_TEXT = { crit: 'Needs you', warn: 'Worth a look', info: 'For your information' };
 const findingRow = f => `<div class="finding ${f.level}">${ic(f.level === 'crit' ? 'crit' : f.level === 'warn' ? 'alert' : 'info', 'i fi')}
-  <div><div class="t">${esc(f.title)}</div><div class="d">${esc(f.detail)}</div>
-  <div class="m"><span class="kind">${ic(f.machine_id === 'pc' ? 'pc' : 'server')}${esc(f.machine)}</span><span>${LEVEL_TEXT[f.level]}</span>${f.retry ? `<button class="btn small" data-retry="${esc(f.machine_id)}">${ic('refresh')}Retry now</button>` : ''}</div></div>
+  <div><div class="t">${esc(f.title)}</div><div class="d">${esc(f.detail)}</div>${f.action ? `<div class="act"><b>What to do:</b> ${esc(f.action)}</div>` : ''}${f.commands?.length ? `<pre class="cmds" title="Read-only commands to run on the server">${esc(f.commands.join(String.fromCharCode(10)))}</pre>` : ''}
+  <div class="m"><span class="kind">${ic(f.machine_id === 'pc' ? 'pc' : 'server')}${esc(f.machine)}</span><span>${LEVEL_TEXT[f.level]}</span>${f.retry ? `<button class="btn small" data-retry="${esc(f.machine_id)}">${ic('refresh')}Retry now</button>` : ''}${f.running ? stopBtn(f.running) : ''}</div></div>
   <span class="when">${when(f.at)}</span></div>`;
 
 /* ================= Line charts ================= */
@@ -251,7 +261,7 @@ function renderSide() {
         : `<span class="minis"><span class="mini">CPU ${meter(s.cpu, true)}</span><span class="mini">Mem ${meter(s.mem_pct, true)}</span></span>`}
     </button>`;
   const u = S.update;
-  const upd = u.state === 'available' ? `<div class="update">${ic('download')}<span class="grow">Version ${esc(u.version)} is ready</span><button class="btn small" data-dialog="update">What's new</button></div>`
+  const upd = u.state === 'available' ? `<div class="update">${ic('download')}<span class="grow">Version ${esc(u.version)} is ready</span><button class="btn small" data-dialog="update">What's new</button><button class="btn primary small" data-dialog="update">${ic('download')}Update now</button></div>`
     : u.state === 'downloading' ? `<div class="update">${ic('download')}<span class="grow">Downloading ${u.total ? Math.round(u.done / u.total * 100) + '%' : ''}</span></div>`
     : u.state === 'restarting' ? `<div class="update">${ic('refresh')}<span class="grow">Restarting to finish the update</span></div>` : '';
   const recLine = sd.recorder
@@ -264,6 +274,8 @@ function renderSide() {
       <button class="nav" ${cur('findings')} data-go="findings">${ic('alert')}Findings${S.attn != null ? `<span class="count ${S.attn ? 'attn' : ''}">${S.attn}</span>` : ''}</button>
       <div class="side-label"><span>This PC</span></div>
       ${pcRow}
+      <button class="nav" ${S.page === 'machine' && S.machine === 'pc' && S.tab === 'cleanup' ? 'aria-current="page"' : ''} data-go="machine" data-m="pc" data-t="cleanup">${ic('broom')}Clean up${sd.cleanup_n ? `<span class="count attn">${sd.cleanup_n}</span>` : ''}</button>
+      <button class="nav" ${S.page === 'machine' && S.machine === 'pc' && S.tab === 'storage' ? 'aria-current="page"' : ''} data-go="machine" data-m="pc" data-t="storage">${ic('disk')}Storage</button>
       <div class="side-label"><span>Servers</span><span>${sd.ssh ? (watchedN ? `${online} of ${watchedN} online` : 'None picked') : 'Off'}</span></div>
       ${sd.ssh ? servers.map(srvRow).join('') + `<button class="nav" ${cur('keys')} data-go="keys">${ic('key')}SSH keys</button>`
         : `<button class="nav" data-go="settings">${ic('server')}Add servers over SSH</button>`}
@@ -353,11 +365,11 @@ async function pageFindings() {
 /* ================= This PC ================= */
 const cpuFmt = (v, axis) => axis ? Math.round(v) + '%' : pct(v);
 async function pagePC() {
-  const t = { now: pcNow, history: pcHistory, apps: pcApps, running: pcRunning, recordings: pcRecordings, insights: pcInsights }[S.tab] || pcNow;
+  const t = { now: pcNow, cleanup: pcCleanup, storage: pcStorage, history: pcHistory, apps: pcApps, running: pcRunning, recordings: pcRecordings, insights: pcInsights }[S.tab] || pcNow;
   const [body, now] = await Promise.all([t(), S.pcHead ? Promise.resolve(S.pcHead) : invoke('pc_now')]);
   if (!S.pcHead || S.tab === 'now') S.pcHead = now;
   const h = S.pcHead.host, total = S.pcHead.latest?.mem_total;
-  const tabs = [['now', 'Now'], ['history', 'History'], ['apps', 'Apps'], ['running', 'Running', S.pcHead.apps.length], ['recordings', 'Recordings'], ['insights', 'Insights']];
+  const tabs = [['now', 'Now'], ['cleanup', 'Clean up', S.side?.cleanup_n || null], ['storage', 'Storage'], ['history', 'History'], ['apps', 'Apps'], ['running', 'Running', S.pcHead.apps.length], ['recordings', 'Recordings'], ['insights', 'Insights']];
   const sub = `<span>${esc(h.os)}</span><span>${h.cores} threads</span>${total ? `<span>${bytes(total)} memory</span>` : ''}<span>Up ${dur(h.uptime)}</span>`;
   return head(`${esc(h.name)}${S.side?.recorder ? '' : `<span class="status crit">${ic('crit')}Not recording</span>`}`, sub, '', tabs) + `<div class="body">${body}</div>`;
 }
@@ -376,18 +388,27 @@ async function pcNow() {
     ${tile('Disk and file I/O', rate(p.io_rate), 'All apps reading and writing files', r.map(x => x.io_rate))}
     ${tile('Network', rate(d.net_in + d.net_out), `in ${rate(d.net_in)} · out ${rate(d.net_out)}`, r.map(x => x.net_rate))}
     ${tile('Processes', Math.round(p.procs) || '–', 'Programs and background services', r.map(x => x.procs))}
-    ${tile('Apps open', Math.round(p.apps) || d.apps.length, 'Programs with at least one process', r.map(x => x.apps))}
+    ${p.commit_pct ? tile('Committed memory', pct(p.commit_pct), 'RAM plus page file promised to apps', r.map(x => x.commit_pct), 100) : tile('Apps open', Math.round(p.apps) || d.apps.length, 'Programs with at least one process', r.map(x => x.apps))}
   </div>
   <section class="panel">
     <div class="panel-head"><h2>Using the most right now</h2><span class="grow"></span><span class="lbl muted">Sort by</span>
       ${seg('sort', [['cpu', 'CPU'], ['mem', 'Memory'], ['io', 'I/O']], S.sort)}</div>
-    <div class="wrap-x" style="margin-top:10px"><table class="tbl"><thead><tr><th>App</th><th class="r">CPU</th><th class="r">Memory</th><th class="r">Disk and file I/O</th><th class="r">Processes</th></tr></thead><tbody>
-    ${rows.map(a => `<tr class="click" data-pcapp="${esc(a.app)}"><td><b style="font-weight:600">${esc(a.app)}</b><span class="sub">${esc(a.explain || a.name)}</span></td>
+    <div class="wrap-x" style="margin-top:10px"><table class="tbl freeze"><thead><tr><th>App</th><th class="r">CPU</th><th class="r">Memory</th><th class="r">Disk and file I/O</th><th class="r">Processes</th><th></th></tr></thead><tbody>
+    ${rows.map(a => `<tr class="click" data-pcapp="${esc(a.app)}"><td><b style="font-weight:600">${esc(friendly(a))}</b><span class="sub">${esc(a.app)} · ${esc(a.explain || a.name)}</span></td>
       <td class="r"><div class="barcell"><b>${pct(a.cpu)}</b>${meter(a.cpu / maxCpu * 100, true)}</div></td>
       <td class="r"><div class="barcell"><b>${bytes(a.mem)}</b>${meter(a.mem / maxMem * 100, true)}</div></td>
-      <td class="r num">${rate(a.io_rate)}</td><td class="r num">${a.procs}</td></tr>`).join('')}
+      <td class="r num">${rate(a.io_rate)}</td><td class="r num">${a.procs}</td><td class="r">${stopBtn(a)}</td></tr>`).join('')}
     </tbody></table></div>
+    <p class="note" style="padding:8px 16px 12px">Not sure what is safe to stop? <button class="btn small ghost" data-tab="cleanup">${ic('broom')}Open Clean up</button> groups everything by the app that started it.</p>
   </section>`;
+}
+// Friendly name: the window title or file description when the exe name says little.
+const friendly = a => (a.name && a.name.toLowerCase() !== a.app.toLowerCase().replace(/\.exe$/, '') ? a.name : a.app.replace(/\.exe$/i, ''));
+// Stop asks first when it ends many processes or ones without a window (they cannot be asked to save).
+function stopBtn(a) {
+  if (a.protected) return '<span class="muted" style="font-size:12px">Part of Windows</span>';
+  if (S.asked.has(a.app)) return `<button class="btn small danger" data-force="${esc(a.app)}">Force stop</button>`;
+  return `<button class="btn small" data-stopask="${esc(a.app)}" data-procs="${a.procs}" data-mem="${a.mem}" data-win="${a.titles ? 1 : 0}">${ic('stop')}Stop</button>`;
 }
 
 function heatmap(grid, label, fmtV) {
@@ -428,6 +449,7 @@ async function pcHistory() {
     <p class="note">Gaps mean the app was not running. Network is not shown for single apps because Windows does not report it per app.</p>` : `
     ${lineChart({ id: 'h-cpu', title: 'CPU', pts: pick('cpu'), from, to, bucket: b, max: 100, fmt: cpuFmt, group: 'h', tip: tipApps })}
     ${lineChart({ id: 'h-mem', title: 'Memory', pts: pick('mem_pct'), from, to, bucket: b, max: 100, fmt: v => Math.round(v) + '%', group: 'h' })}
+    ${P.some(p => p.commit_pct) ? lineChart({ id: 'h-commit', title: 'Committed memory (RAM plus page file)', pts: P.map(p => [p.ts, p.commit_pct || null]), from, to, bucket: b, max: 100, fmt: v => Math.round(v) + '%', group: 'h', h: 90 }) : ''}
     ${lineChart({ id: 'h-io', title: 'Disk and file I/O', pts: pick('io_rate'), from, to, bucket: b, fmt: rate, group: 'h', h: 90 })}
     ${lineChart({ id: 'h-net', title: 'Network', pts: pick('net_rate'), from, to, bucket: b, fmt: rate, group: 'h', h: 90 })}
     ${lineChart({ id: 'h-pr', title: 'Processes running', pts: pick('procs'), from, to, bucket: b, fmt: v => Math.round(v), group: 'h', h: 70 })}`;
@@ -479,18 +501,411 @@ async function pcApps() {
 
 async function pcRunning() {
   const d = await invoke('pc_now'); S.pcHead = d;
-  const key = S.sort === 'mem' ? 'mem' : 'cpu';
-  const apps = [...d.apps].sort((a, b) => b[key] - a[key]);
-  const action = a => a.protected ? '<span class="muted" style="font-size:12px">Part of Windows</span>'
-    : S.asked.has(a.app) ? `<span class="muted" style="font-size:12px;margin-right:8px">Did not close</span><button class="btn small danger" data-force="${esc(a.app)}">Force stop</button>`
-    : `<button class="btn small" data-stop="${esc(a.app)}">${ic('stop')}Stop app</button>`;
+  const key = S.sort === 'mem' ? 'mem' : S.sort === 'private' ? 'private' : 'cpu';
+  const q = S.runQuery.trim().toLowerCase();
+  const apps = [...d.apps].filter(a => !q || (a.app + ' ' + (a.name || '') + ' ' + (a.titles || '')).toLowerCase().includes(q)).sort((a, b) => b[key] - a[key]);
   return `
-  <div class="toolbar"><span class="lbl">Sort by</span>${seg('sort', [['cpu', 'CPU'], ['mem', 'Memory']], key)}<span class="grow"></span><span class="muted" style="font-size:12px">Stopping an app closes it like quitting it. Nothing is uninstalled or deleted.</span></div>
-  <section class="panel"><div class="wrap-x"><table class="tbl"><thead><tr><th>App</th><th class="r">Processes</th><th class="r">CPU</th><th class="r">Memory</th><th></th></tr></thead><tbody>
-    ${apps.map(a => `<tr><td><b style="font-weight:600">${esc(a.app)}</b><span class="sub">${esc(a.explain || a.name)}</span>${a.titles ? `<span class="titles" title="${esc(a.titles)}">${esc(a.titles)}</span>` : ''}</td>
-      <td class="r num">${a.procs}</td><td class="r num">${pct(a.cpu)}</td><td class="r num">${bytes(a.mem)}</td>
-      <td class="r">${action(a)}</td></tr>`).join('')}
-  </tbody></table></div></section>`;
+  <div class="toolbar"><input class="input" id="runq" type="search" placeholder="Find an app" value="${esc(S.runQuery)}" aria-label="Find an app"><span class="lbl">Sort by</span>${seg('sort', [['cpu', 'CPU'], ['mem', 'Memory'], ['private', 'Committed']], key)}<span class="grow"></span><span class="muted" style="font-size:12px">Stopping closes an app like quitting it. Nothing is uninstalled. The list holds still while the pointer is over it.</span></div>
+  <section class="panel"><div class="wrap-x"><table class="tbl freeze"><thead><tr><th>App</th><th class="r">Processes</th><th class="r">CPU</th><th class="r">Memory</th><th class="r" title="Private memory the app has been promised. This is what fills the commit limit.">Committed</th><th></th></tr></thead><tbody>
+    ${apps.map(a => `<tr><td><b style="font-weight:600">${esc(friendly(a))}</b><span class="sub">${esc(a.app)} · ${esc(a.explain || a.name)}</span>${a.titles ? `<span class="titles" title="${esc(a.titles)}">${esc(a.titles)}</span>` : ''}</td>
+      <td class="r num">${a.procs}</td><td class="r num">${pct(a.cpu)}</td><td class="r num">${bytes(a.mem)}</td><td class="r num">${a.private ? bytes(a.private) : '–'}</td>
+      <td class="r">${stopBtn(a)}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">No app matches.</td></tr>'}
+  </tbody></table></div>
+  <p class="note" style="padding:10px 16px 14px">Processes with the same name count as one app here, so stopping node.exe ends every node.exe. To stop one session or helper on its own, use <button class="btn small ghost" data-tab="cleanup">${ic('broom')}Clean up</button>.</p></section>`;
+}
+
+/* ---------- Clean up ---------- */
+const idleText = s => s >= 3600 ? `idle ${dur(s)}` : s >= 120 ? `idle ${Math.round(s / 60)} min` : 'active';
+async function pcCleanup() {
+  const [d, now] = await Promise.all([invoke('pc_tree'), invoke('pc_now')]);
+  S.pcHead = now;
+  for (const x of d.suggestions) { const k = key2(x.pid, x.started); if (!S.cleanSeen.has(k)) { S.cleanSeen.add(k); if (x.checked) S.cleanSel.add(k); } }
+  const live = new Set(d.suggestions.map(x => key2(x.pid, x.started)));
+  for (const k of [...S.cleanSel]) if (!live.has(k)) S.cleanSel.delete(k);
+  const sel = d.suggestions.filter(x => S.cleanSel.has(key2(x.pid, x.started)));
+  const selMem = sel.reduce((t, x) => t + x.sum.mem, 0);
+  const p = now.latest?.point, total = now.latest?.mem_total || 0;
+  const KIND = { orphan: 'Left over', idle_agent: 'Idle agent session' };
+  const autoN = d.suggestions.filter(x => x.kind === 'orphan' && x.checked && x.sum.idle >= d.auto_minutes * 60).length;
+  const sugg = d.suggestions.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th style="width:28px"></th><th>What</th><th>Why</th><th class="r">Processes</th><th class="r">Memory</th><th class="r">Last active</th></tr></thead><tbody>
+    ${d.suggestions.map(x => `<tr><td><input type="checkbox" class="check" data-csel="${key2(x.pid, x.started)}" ${S.cleanSel.has(key2(x.pid, x.started)) ? 'checked' : ''} aria-label="Select ${esc(x.label)}"></td>
+      <td><b style="font-weight:600">${esc(x.label)}</b><span class="sub">pid ${x.pid}</span></td><td class="wrap"><span class="chip">${KIND[x.kind] || x.kind}</span> <span class="ink2">${esc(x.why)}</span></td>
+      <td class="r num">${x.sum.procs}</td><td class="r num">${bytes(x.sum.mem)}</td><td class="r">${idleText(x.sum.idle)}</td></tr>`).join('')}
+    </tbody></table></div>` : `<div class="empty">Nothing is left over right now. Helpers left behind by closed apps, and agent sessions idle for ${Math.round(d.agent_idle / 60)} minutes, show up here.</div>`;
+  const branchRow = b => `<tr class="branch"><td><span class="tree-ind"></span><b style="font-weight:600">${esc(b.title || b.label)}</b>${b.title ? `<span class="sub">${esc(b.label)}</span>` : ''}${b.agent ? ' <span class="chip">Agent session</span>' : ''}</td>
+      <td class="r num">${b.sum.procs}</td><td class="r num">${pct(b.sum.cpu)}</td><td class="r num">${bytes(b.sum.mem)}</td><td class="r">${idleText(b.sum.idle)}</td>
+      <td class="r"><button class="btn small" data-treestop="${key2(b.pid, b.started)}" data-label="${esc(b.title || b.label)}" data-procs="${b.sum.procs}" data-mem="${b.sum.mem}">${ic('stop')}Stop</button></td></tr>`;
+  const groups = d.groups.slice(0, 30).map(g => {
+    const open = S.openGroups.has(g.pid);
+    const name = g.title ? `${esc(g.title)}<span class="sub">${esc(g.label)}</span>` : esc(g.label);
+    return `<tr class="${g.branches.length ? 'click' : ''}" ${g.branches.length ? `data-gtoggle="${g.pid}"` : ''}><td>${g.branches.length ? `<span class="caret ${open ? 'open' : ''}">›</span>` : '<span class="tree-ind"></span>'}<b style="font-weight:600">${name}</b>${g.branches.length ? ` <span class="chip">${g.branches.length} inside</span>` : ''}</td>
+      <td class="r num">${g.sum.procs}</td><td class="r num">${pct(g.sum.cpu)}</td><td class="r num">${bytes(g.sum.mem)}</td><td class="r">${idleText(g.sum.idle)}</td>
+      <td class="r"><button class="btn small" data-treestop="${key2(g.pid, g.started)}" data-label="${esc(g.title || g.label)}" data-procs="${g.sum.procs}" data-mem="${g.sum.mem}">${ic('stop')}Stop all</button></td></tr>
+      ${open ? g.branches.map(branchRow).join('') : ''}`;
+  }).join('');
+  const log = d.log.length ? d.log.slice(0, 10).map(l => `<div style="display:flex;gap:10px;padding:4px 0;font-size:12.5px"><span class="muted" style="width:120px;flex:none">${when(l.ts)}</span><span style="flex:1"><b style="font-weight:600">${esc(l.name)}</b> · ${l.procs} process${l.procs === 1 ? '' : 'es'}, ${bytes(l.mem)}</span><span class="muted">${l.auto ? 'Automatic' : 'By you'}</span></div>`).join('') : '<span class="muted">Nothing stopped yet.</span>';
+  const big = d.groups[0];
+  return `
+  <div class="summary">
+    <div><div class="k">Memory in use</div><div class="v ${p && p.mem_pct >= 90 ? 'crit' : ''}">${p ? pct(p.mem_pct) : '–'}</div><div class="d">${p ? ofBytes(p.mem_used, total) : ''}</div></div>
+    <div><div class="k">Committed</div><div class="v ${p && p.commit_pct >= 90 ? 'crit' : ''}">${p?.commit_pct ? pct(p.commit_pct) : '–'}</div><div class="d">Of RAM plus page file</div></div>
+    <div><div class="k">Can be cleaned up</div><div class="v">${d.suggestions.length}</div><div class="d">${d.suggestions.length ? bytes(d.suggestions.reduce((t, x) => t + x.sum.mem, 0)) + ' in total' : 'Nothing left over'}</div></div>
+    <div><div class="k">Biggest app</div><div class="v" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${big ? esc(big.title || big.name.replace(/\.exe$/i, '')) : '–'}</div><div class="d">${big ? `${big.sum.procs} processes, ${bytes(big.sum.mem)}` : ''}</div></div>
+  </div>
+  <section class="panel"><div class="panel-head"><h2>Suggested clean-up</h2><span class="hint">Checked items are safe to stop: helpers whose app already closed.</span><span class="grow"></span>
+    <button class="btn primary" data-action="clean-selected" ${sel.length ? '' : 'disabled'}>${ic('broom')}Stop ${sel.length || ''} selected${sel.length ? `, frees about ${bytes(selMem)}` : ''}</button></div>${sugg}</section>
+  <section class="panel"><div class="panel-head"><h2>What each app is running</h2><span class="hint">Every process is counted under the app that started it. Open an app to stop one session or helper on its own.</span></div>
+    <div class="wrap-x"><table class="tbl freeze"><thead><tr><th>App</th><th class="r">Processes</th><th class="r">CPU</th><th class="r">Memory</th><th class="r">Last active</th><th></th></tr></thead><tbody>${groups}</tbody></table></div></section>
+  <section class="panel"><div class="panel-head"><h2>Automatic clean-up</h2></div><div class="set-list" style="margin-top:4px">
+    <div class="set-row"><div><div class="t">Stop left-over helpers on their own</div><div class="d">The recorder checks once a minute and ends small helpers (node, python, shells) whose app has closed, once they have been idle for the time below. Never anything with a window, anything that looks like a server, anything of Windows, or other users' processes. Off by default.</div></div><label class="switch"><input type="checkbox" id="autoclean" ${d.auto ? 'checked' : ''} aria-label="Stop left-over helpers on their own"><span></span></label></div>
+    <div class="set-row"><div><div class="t">Idle for at least</div><div class="d">${d.auto ? 'Right now this would stop' : 'If it were on, it would stop'} ${autoN} item${autoN === 1 ? '' : 's'} right now.</div></div><select class="select" id="automin">${[10, 15, 30, 60].map(n => `<option value="${n}" ${d.auto_minutes === n ? 'selected' : ''}>${n} minutes</option>`).join('')}</select></div>
+  </div><div class="panel-body"><div class="muted" style="font-size:12px;margin-bottom:4px">Recently stopped</div>${log}</div></section>`;
+}
+
+/* ---------- Storage ---------- */
+const num = v => Number(v || 0).toLocaleString();
+const day = ts => ts ? new Date(ts * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '–';
+// "today 3:12 PM" in the middle of a sentence.
+const whenLow = ts => when(ts).replace(/^(Today|Yesterday)/, w => w.toLowerCase());
+const stNorm = p => String(p || '').toLowerCase().replace(/[\\/]+$/, '');
+// What is selected, without counting a file again when its folder is selected too.
+function stSelected() {
+  const all = [...S.stSel.values()];
+  const dirs = all.filter(x => x.dir != null).map(x => x.path.toLowerCase() + '\\');
+  return all.filter(x => !dirs.some(d => x.path.toLowerCase().startsWith(d)));
+}
+const stCheck = (x, extra = '') => `<input type="checkbox" class="check" data-stsel="${esc(x.path)}" data-size="${x.size}"${x.dir != null ? ` data-dir="${x.dir}"` : ''}${x.parent != null ? ` data-parent="${x.parent}"` : ''} ${extra} ${S.stSel.has(x.path) ? 'checked' : ''} aria-label="Select ${esc(x.path)}">`;
+const revealBtn = p => `<button class="btn small ghost" data-streveal="${esc(p)}" title="Show in File Explorer">Show</button>`;
+// A column header that sorts by `k`. Clicking the column already sorted by flips the order.
+const ST_DIR_WORDS = { size: ['Smallest first', 'Biggest first'], name: ['A to Z', 'Z to A'], modified: ['Oldest first', 'Newest first'], files: ['Fewest files first', 'Most files first'], own: ['Smallest first', 'Biggest first'] };
+function stTh(k, label, cur, desc, attr, cls = '', style = '') {
+  const on = cur === k;
+  const next = on ? !desc : k !== 'name';
+  return `<th class="${cls}" ${style ? `style="${style}"` : ''} aria-sort="${on ? (desc ? 'descending' : 'ascending') : 'none'}"><button class="th-sort ${on ? 'on' : ''}" data-${attr}="${k}" title="Sort: ${ST_DIR_WORDS[k][next ? 1 : 0]}">${label}${on ? ic(desc ? 'sort-down' : 'sort-up') : ''}</button></th>`;
+}
+
+// A size map of one folder: each box is as big as the space it takes. Folders open on click, files select.
+function stSquarify(items, x, y, w, h) {
+  const out = [], total = items.reduce((t, i) => t + i.size, 0);
+  if (!total || w <= 0 || h <= 0) return out;
+  const scale = (w * h) / total;
+  let rest = items.map(i => ({ i, a: i.size * scale }));
+  const worst = (row, side) => { const s = row.reduce((t, r) => t + r.a, 0); let m = 0; for (const r of row) m = Math.max(m, (side * side * r.a) / (s * s), (s * s) / (side * side * r.a)); return m; };
+  while (rest.length) {
+    const side = Math.min(w, h);
+    const row = [rest[0]]; let k = 1;
+    while (k < rest.length && worst([...row, rest[k]], side) <= worst(row, side)) row.push(rest[k++]);
+    rest = rest.slice(k);
+    const s = row.reduce((t, r) => t + r.a, 0);
+    if (w >= h) { const rw = s / h; let yy = y; for (const r of row) { const rh = r.a / rw; out.push({ ...r, x, y: yy, w: rw, h: rh }); yy += rh; } x += rw; w -= rw; }
+    else { const rh = s / w; let xx = x; for (const r of row) { const rw = r.a / rh; out.push({ ...r, x: xx, y, w: rw, h: rh }); xx += rw; } y += rh; h -= rh; }
+  }
+  return out;
+}
+const ST_TYPE_COLOR = { Videos: 's2', Pictures: 's3', Music: 's4', Archives: 's1', 'Installers and disk images': 's1', 'Virtual machines and databases': 's2', Documents: 's3', Programs: 's4', Code: 's1', 'Game and 3D files': 's3', Other: 'other' };
+function stMap(f) {
+  const items = f.items.filter(x => x.size > 0).sort((a, b) => b.size - a.size).slice(0, 120);
+  if (!items.length) return '';
+  const W = Math.max(320, (document.getElementById('main')?.clientWidth || 900) - 64), H = 260;
+  const boxes = stSquarify(items, 0, 0, W, H);
+  return `<div class="st-map" style="height:${H}px" role="group" aria-label="Size map of ${esc(f.path)}">${boxes.map(b => {
+    const x = b.i;
+    // Big folders show what is inside them as a second level, below a name bar.
+    const inner = x.dir && x.kids?.length && b.w > 110 && b.h > 70;
+    let kids = '';
+    if (inner) {
+      const top = 34, kb = stSquarify(x.kids.filter(k => k.size > 0), 3, top, b.w - 6, b.h - top - 3);
+      kids = kb.map(k => stBox(k.i, k.x, k.y, k.w, k.h, b.w, b.h, f.id, true)).join('');
+    }
+    return stBox(x, b.x, b.y, b.w, b.h, W, H, f.id, false, kids);
+  }).join('')}</div><div class="st-map-key muted"><span><i class="dir"></i>Folder, click to open</span><span><i class="file"></i>File, click to select</span><span>Big folders show what is inside them.</span>${items.length < f.items.filter(x => x.size > 0).length ? `<span>The 120 biggest are shown.</span>` : ''}</div>`;
+}
+function stBox(x, bx, by, bw, bh, W, H, parentId, nested, kids = '') {
+  const label = bw > 70 && bh > 30, sel = x.path && S.stSel.has(x.path);
+  const tip = `${x.name}: ${bytes(x.size)}${x.dir ? `, ${num(x.files)} file${x.files === 1 ? '' : 's'}. Click to open.` : '. Click to select.'}`;
+  const attrs = x.dir ? `data-stdir="${x.id}"` : x.locked || x.cloud ? '' : `data-stmapsel="${esc(x.path)}" data-size="${x.size}" data-parent="${x.parent ?? parentId}"`;
+  const tag = kids ? 'div' : 'button';
+  return `<${tag} class="st-box ${x.dir ? 'dir' : 'file'} ${nested ? 'nested' : ''} ${kids ? 'has-kids' : ''} ${sel ? 'sel' : ''}" ${kids ? '' : attrs} title="${esc(tip)}" ${kids ? '' : `aria-label="${esc(tip)}"`}
+    style="left:${(bx / W * 100).toFixed(3)}%;top:${(by / H * 100).toFixed(3)}%;width:${(bw / W * 100).toFixed(3)}%;height:${(bh / H * 100).toFixed(3)}%">${kids ? `<button class="st-box-head" ${attrs} aria-label="${esc(tip)}"><span class="n">${esc(x.name)}</span><span class="s">${bytes(x.size)}</span></button>${kids}`
+    : label ? `<span class="n">${esc(x.name)}</span><span class="s">${bytes(x.size)}</span>` : ''}</${tag}>`;
+}
+// Files Windows keeps for itself, explained where they show up.
+const ST_SYSTEM_FILES = { 'pagefile.sys': 'Page file: Windows uses it as extra memory. Change its size in System > About > Advanced system settings > Performance.', 'hiberfil.sys': 'Hibernation file: holds memory while the PC hibernates. Turning off hibernation (powercfg /h off, as administrator) deletes it.', 'swapfile.sys': 'Swap file for Store apps. Windows manages it.', 'memory.dmp': 'Memory dump from a crash. Safe to delete with Windows Storage settings.' };
+
+const ST_PHASE = { walking: 'Looking through files', comparing: 'Comparing possible duplicates', caches: 'Measuring caches' };
+
+// The caches that have something to clear.
+const stJunkList = d => (d?.caches?.list || []).filter(j => j.size > 0);
+const stList = a => a.length <= 6 ? a.join(', ') : `${a.slice(0, 5).join(', ')} and ${a.length - 5} more`;
+// Caches smaller than this are folded away, apart from the three biggest of each group.
+const ST_SMALL = 50 * 1024 * 1024;
+
+function stCaches(d) {
+  const c = d.caches || {}, job = c.clean, busy = job?.state === 'running';
+  const all = stJunkList(d);
+  const sel = all.filter(j => S.stJunk.has(j.id)), selSize = sel.reduce((t, j) => t + j.size, 0);
+  const rec = all.filter(j => j.rec), recSize = rec.reduce((t, j) => t + j.size, 0);
+  const recOn = rec.length > 0 && rec.every(j => S.stJunk.has(j.id));
+  const max = Math.max(1, ...all.map(j => j.size));
+  const row = j => {
+    const open = S.stJunkOpen.has(j.id);
+    return `<tr><td><input type="checkbox" class="check" data-jsel="${esc(j.id)}" ${S.stJunk.has(j.id) ? 'checked' : ''} ${busy ? 'disabled' : ''} aria-label="Select ${esc(j.label)}"></td>
+      <td class="wrap"><b style="font-weight:600">${esc(j.label)}</b>${j.rec ? '' : ' <span class="chip" title="Select recommended leaves this one out">Slow to get back</span>'}
+        <span class="sub">${esc(j.explain)}</span>
+        ${j.running ? `<span class="sub st-open">${ic('alert')}${esc(j.running)} is open. Close it first to clear all of this.</span>` : ''}
+        ${open ? `<div class="st-paths">${j.paths.map(p => `<div><span class="mono">${esc(p.path)}</span><span class="num">${bytes(p.size)}</span>${revealBtn(p.path)}</div>`).join('')}</div>` : ''}</td>
+      <td class="r opt"><button class="btn small ghost" data-stjopen="${esc(j.id)}" aria-expanded="${open}">${open ? 'Hide folders' : `${j.paths.length} folder${j.paths.length === 1 ? '' : 's'}`}</button></td>
+      <td class="r num opt">${num(j.files)}</td><td><div class="barcell"><b>${bytes(j.size)}</b>${meter(j.size / max * 100, true)}</div></td></tr>`;
+  };
+  const groups = (c.groups || []).map(g => {
+    const rows = all.filter(j => j.group === g).sort((a, b) => b.size - a.size);
+    if (!rows.length) return '';
+    const fold = rows.filter((j, i) => i >= 3 && j.size < ST_SMALL), openAll = S.stJunkAll.has(g);
+    const shown = openAll ? rows : rows.filter(j => !fold.includes(j));
+    return `<tr class="dup-h"><td></td><td colspan="4"><b style="font-weight:600">${esc(g)}</b> <span class="muted">· ${bytes(rows.reduce((t, j) => t + j.size, 0))} in ${rows.length} place${rows.length === 1 ? '' : 's'}</span></td></tr>
+      ${shown.map(row).join('')}
+      ${fold.length ? `<tr><td></td><td colspan="4"><button class="btn small ghost" data-stjall="${esc(g)}" aria-expanded="${openAll}">${openAll ? 'Show fewer' : `Show ${fold.length} smaller, ${bytes(fold.reduce((t, j) => t + j.size, 0))}`}</button></td></tr>` : ''}`;
+  }).join('');
+  const prog = busy ? `<div class="apjob"><div class="grow"><b style="font-weight:600">Clearing ${esc(job.label)}</b> <span class="muted">· ${bytes(job.freed)}${job.total ? ` of about ${bytes(job.total)}` : ''} freed</span><div style="margin-top:6px">${meter(job.total ? job.freed / job.total * 100 : 0, true)}</div></div><button class="btn small" data-action="st-clean-cancel" ${job.cancelled ? 'disabled' : ''}>${job.cancelled ? 'Stopping' : 'Cancel'}</button></div>` : '';
+  const msg = !busy && S.stCleanMsg ? `<div class="apjob"><div class="grow">${esc(S.stCleanMsg)}</div><button class="btn small ghost" data-action="st-clean-ok">Dismiss</button></div>` : '';
+  const f = d.freed;
+  const foot = `<div class="panel-body toolbar"><span class="muted grow" style="font-size:12px">${c.pending ? `Measuring, ${num(c.pending)} place${c.pending === 1 ? '' : 's'} to go. Sizes fill in as they are measured.` : f?.times ? `Cleared with JPerformance so far: ${bytes(f.total)} in ${num(f.times)} clean-up${f.times === 1 ? '' : 's'}. Last time ${whenLow(f.last.ts)}, ${bytes(f.last.freed)}.` : 'Sizes are measured when you open this page. Measure again for fresh numbers.'}</span>
+    <button class="btn small" data-action="st-remeasure" ${c.measuring || busy ? 'disabled' : ''}>${ic('refresh')}${c.measuring ? 'Measuring' : 'Measure again'}</button></div>`;
+  return `<section class="panel"><div class="panel-head"><h2>Caches</h2><span class="hint">Programs download or rebuild these when needed. They are deleted for good, since keeping them in the Recycle Bin would free nothing. Files a running program has open are skipped.</span><span class="grow"></span>
+        <button class="btn" data-action="st-selrec" ${rec.length && !busy ? '' : 'disabled'}>${recOn ? 'Select none' : `Select recommended${recSize ? `, ${bytes(recSize)}` : ''}`}</button><button class="btn primary" data-action="st-clean" ${sel.length && !busy ? '' : 'disabled'}>${ic('broom')}Clear ${sel.length || ''} selected${sel.length ? `, ${bytes(selSize)}` : ''}</button></div>
+      ${prog}${msg}
+      ${c.measuring && !all.length ? '<div class="empty">Measuring caches…</div>' : all.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th style="width:28px"></th><th>What</th><th class="opt"></th><th class="r opt">Files</th><th style="width:200px">Size</th></tr></thead><tbody>${groups}</tbody></table></div>` : '<div class="empty">No caches worth clearing.</div>'}
+      ${foot}</section>
+    <section class="panel"><div class="panel-head"><h2>Recycle Bin</h2><span class="hint">Deleted files stay on the disk until the bin is emptied.</span><span class="grow"></span><button class="btn" data-action="st-bin" ${d.bin.items ? '' : 'disabled'}>${ic('trash')}Empty Recycle Bin${d.bin.items ? `, ${bytes(d.bin.size)}` : ''}</button></div><div class="panel-body"><span class="muted">${d.bin.items ? `${num(d.bin.items)} items, ${bytes(d.bin.size)}.` : 'Empty.'}</span></div></section>`;
+}
+
+const ST_AGES = [[0, 'Everything'], [30, 'Not changed for 30 days'], [90, 'Not changed for 90 days'], [180, 'Not changed for 6 months'], [365, 'Not changed for a year']];
+// What sits in the Downloads folder, where old installers and archives pile up.
+function stDownloads(dl) {
+  if (!dl) return '';
+  if (!dl.ready) return dl.busy ? '<section class="panel"><div class="panel-head"><h2>Downloads folder</h2></div><div class="empty">Measuring Downloads…</div></section>' : '';
+  const max = Math.max(1, ...dl.items.map(x => x.size));
+  const row = x => `<tr><td>${stCheck({ path: x.path, size: x.size })}</td><td class="wrap"><b style="font-weight:600">${esc(x.name)}</b>${x.dir ? `<span class="sub">${num(x.files)} file${x.files === 1 ? '' : 's'} inside</span>` : ''}</td><td class="opt"><span class="chip">${esc(x.type)}</span></td><td class="r opt">${day(x.modified)}</td><td><div class="barcell"><b>${bytes(x.size)}</b>${meter(x.size / max * 100, true)}</div></td><td class="r">${revealBtn(x.path)}</td></tr>`;
+  return `<section class="panel"><div class="panel-head"><h2>Downloads folder</h2><span class="hint">${bytes(dl.size)} in ${num(dl.count)} items. Installers and archives you no longer need pile up here. What you pick goes to the Recycle Bin.</span><span class="grow"></span>
+      <select class="select" id="stdldays" aria-label="Which downloads to list">${ST_AGES.map(([v, l]) => `<option value="${v}" ${S.stDlDays === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <button class="btn small" data-action="st-dl-setup" ${dl.items.some(x => x.setup) ? '' : 'disabled'}>Select installers and archives</button><button class="btn small" data-action="st-dl-all" ${dl.items.length ? '' : 'disabled'}>Select all listed</button></div>
+    ${dl.items.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th style="width:28px"></th><th>Name</th><th class="opt">Kind</th><th class="r opt">Last changed</th><th style="width:200px">Size</th><th></th></tr></thead><tbody>${dl.items.map(row).join('')}</tbody></table></div>
+      <div class="panel-body toolbar"><span class="muted grow">${dl.old_count > dl.items.length ? `Showing the ${num(dl.items.length)} biggest of ${num(dl.old_count)}, ${bytes(dl.old_size)} in all.` : `${num(dl.old_count)} item${dl.old_count === 1 ? '' : 's'}, ${bytes(dl.old_size)}.`}</span>${dl.old_count > dl.items.length ? `<button class="btn" data-action="st-dl-more">Show ${num(Math.min(100, dl.old_count - dl.items.length))} more</button>` : ''}</div>`
+      : `<div class="empty">${S.stDlDays ? 'Nothing in Downloads has been left that long.' : 'Downloads is empty.'}</div>`}</section>`;
+}
+
+const ST_BUILD_AGES = [[30, '30 days'], [90, '90 days'], [180, '6 months'], [365, 'a year']];
+// Build folders the scan found, and a quick way to pick the ones of projects nobody touched lately.
+function stBuilds(r) {
+  const list = r.builds.slice(0, 200), cut = nowS() - S.stBuildDays * 86400;
+  const stale = list.filter(b => b.project < cut);
+  const total = r.builds.reduce((t, b) => t + b.size, 0);
+  return `<section class="panel"><div class="panel-head"><h2>Project build folders</h2><span class="hint">${r.builds.length ? `${bytes(total)} in ${num(r.builds.length)} folders. ` : ''}Each one comes back when you build or install the project again. Tip: delete these for good; the Recycle Bin is slow with thousands of small files.</span><span class="grow"></span>
+      <select class="select" id="stbdays" aria-label="How long the project has not changed">${ST_BUILD_AGES.map(([v, l]) => `<option value="${v}" ${S.stBuildDays === v ? 'selected' : ''}>Project not changed for ${l}</option>`).join('')}</select>
+      <button class="btn small" data-action="st-build-old" ${stale.length ? '' : 'disabled'}>Select ${stale.length ? `${num(stale.length)}, ${bytes(stale.reduce((t, b) => t + b.size, 0))}` : 'those'}</button></div>
+    ${list.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th style="width:28px"></th><th>Folder</th><th class="opt">Kind</th><th class="r opt">Project last changed</th><th class="r">Size</th><th></th></tr></thead><tbody>
+      ${list.map(b => `<tr><td>${stCheck({ path: b.path, size: b.size, dir: b.id })}</td><td class="wrap mono" style="font-size:12px">${esc(b.path)}</td><td class="opt"><span class="chip" title="${esc(b.back ? 'Comes back with ' + b.back : '')}">${esc(b.kind)}</span></td><td class="r opt">${day(b.project)}</td><td class="r num">${bytes(b.size)}</td><td class="r">${revealBtn(b.path)}</td></tr>`).join('')}
+    </tbody></table></div>${r.builds.length > list.length ? `<p class="note" style="padding:10px 16px">The ${num(list.length)} biggest of ${num(r.builds.length)} are shown.</p>` : ''}` : '<div class="empty">No project build folders here.</div>'}</section>`;
+}
+
+// Big files Windows keeps for itself. They need administrator rights, so Windows' own tools remove them.
+function stWindows(d) {
+  const sys = d.caches?.system || [];
+  return `<section class="panel"><div class="panel-head"><h2>Windows files</h2><span class="hint">Windows Update leftovers, earlier Windows versions and system logs need administrator rights. Windows' own Storage settings can clear them.</span><span class="grow"></span><button class="btn" data-action="st-winset">Open Windows Storage settings</button></div>
+    ${sys.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th>What</th><th class="r">Size</th></tr></thead><tbody>
+      ${sys.map(x => `<tr><td class="wrap"><b style="font-weight:600">${esc(x.label)}</b> <span class="chip mono">${esc(x.name)}</span><span class="sub">${esc(x.explain)}</span><span class="sub">${esc(x.how)}</span></td><td class="r num">${x.size != null ? bytes(x.size) : '<span class="muted">Not measured</span>'}</td></tr>`).join('')}
+    </tbody></table></div>` : '<div class="panel-body"></div>'}</section>`;
+}
+
+async function pcStorage() {
+  const [d, ap] = await Promise.all([invoke('storage_status'), invoke('apps_status').catch(() => null)]);
+  S.stLast = d; S.apLast = ap;
+  const r = d.result, scanning = !!ST_PHASE[d.state];
+  clearTimeout(S.stT);
+  // Asks for the page to be drawn again soon. The soonest request wins.
+  let pollMs = 0;
+  const again = ms => {
+    pollMs = pollMs ? Math.min(pollMs, ms) : ms;
+    clearTimeout(S.stT);
+    S.stT = setTimeout(() => { if (S.page === 'machine' && S.machine === 'pc' && S.tab === 'storage' && !render.busy) render(); }, pollMs);
+  };
+  if (scanning) again(1000);
+  const drives = [...d.drives].sort((a, b) => a.mount.localeCompare(b.mount));
+  const roots = [...drives.map(x => [x.mount + '\\', `Drive ${x.mount}, all of it`]), [d.home, `Your user folder (${d.home})`]];
+  const sysDrive = drives.find(x => x.mount.toUpperCase() === 'C:') || drives[0];
+  const root = S.stRoot || d.root || d.saved?.[0]?.root || (sysDrive ? sysDrive.mount + '\\' : d.home);
+  // Saved results of the chosen folder, from an earlier scan, and whether they are the ones shown.
+  // A folder that is not a drive or the user folder (an earlier scan of it is saved) still gets its own choice.
+  if (!roots.some(([v]) => stNorm(v) === stNorm(root))) roots.push([root, root]);
+  const savedFor = (d.saved || []).find(x => stNorm(x.root) === stNorm(root));
+  const showing = !!r && stNorm(d.root) === stNorm(root);
+  const offerSaved = !scanning && savedFor && !showing;
+  const progress = scanning
+    ? `<div style="min-width:0;flex:1"><b style="font-weight:600">${ST_PHASE[d.state]}</b> <span class="muted">· ${dur(d.secs)}</span>
+        <div class="muted" style="font-size:12px">${d.state === 'walking' ? `${num(d.files)} files, ${bytes(d.bytes)} so far` : d.state === 'comparing' ? `${bytes(d.hashed)} of ${bytes(d.to_hash)} read` : 'Almost done'}</div>
+        ${d.state === 'walking' ? `<div class="mono st-cur" title="${esc(d.current)}">${esc(d.current)}</div>` : ''}</div>`
+    : offerSaved && !r ? `<span class="muted st-prog">Saved results from ${whenLow(savedFor.at)}: ${bytes(savedFor.total)} in ${num(savedFor.files)} files. Open them, or scan again to see what changed.</span>`
+    : d.state === 'cancelled' ? '<span class="muted">The scan was cancelled.</span>'
+    : r ? `<span class="muted st-prog">${d.saved_at ? `Results from ${whenLow(d.saved_at)}. ` : ''}${esc(d.root)}: ${bytes(r.total)} in ${num(r.files)} files. Took ${dur(r.secs)}.${r.cloud ? ` ${bytes(r.cloud)} is in OneDrive only and not on this PC.` : ''}${r.denied ? ` ${num(r.denied)} folders could not be read.` : ''}</span>` : '';
+  const easy = stJunkList(d).filter(j => j.rec).reduce((t, j) => t + j.size, 0) + d.bin.size;
+  const driveTiles = `<div class="summary">${drives.slice(0, 4).map(x => `<div><div class="k">Drive ${esc(x.mount)}</div><div class="v ${x.pct >= 90 ? 'crit' : ''}">${bytes(x.free)} free</div><div class="d">${Math.round(x.pct)}% of ${bytes(x.total)} used</div>${meter(x.pct)}</div>`).join('')}
+    <div><div class="k">Recycle Bin</div><div class="v">${bytes(d.bin.size)}</div><div class="d">${num(d.bin.items)} items, still taking space</div></div>
+    <div><div class="k">Easy to free</div><div class="v">${bytes(easy)}</div><div class="d">${d.caches?.pending ? 'So far. Still measuring caches' : 'Recommended caches and the Recycle Bin'}</div></div></div>`;
+  const scan = `<section class="panel"><div class="panel-head"><h2>Scan</h2><span class="hint">Looks through every file. Nothing is deleted until you pick it and press Delete.</span></div>
+    <div class="panel-body"><div class="toolbar"><select class="select" id="stroot" aria-label="What to scan" ${scanning ? 'disabled' : ''}>${roots.map(([v, l]) => { const sv = (d.saved || []).find(x => stNorm(x.root) === stNorm(v)); return `<option value="${esc(v)}" ${stNorm(v) === stNorm(root) ? 'selected' : ''}>${esc(l)}${sv ? `, saved ${esc(whenLow(sv.at))}` : ''}</option>`; }).join('')}</select>
+    ${scanning ? `<button class="btn" data-action="st-cancel">${ic('x')}Cancel</button>`
+      : offerSaved ? `<button class="btn primary" data-action="st-open" title="Opens what the scan from ${esc(whenLow(savedFor.at))} found, without scanning">${ic('folder')}Open saved results</button><button class="btn" data-action="st-scan">${ic('search')}Scan again</button>`
+      : `<button class="btn primary" data-action="st-scan">${ic('search')}${showing || savedFor ? 'Scan again' : 'Scan'}</button>`}${progress}</div></div></section>`;
+  const appsPanel = ap ? stApps(ap) : '';
+  if (ap && (ap.measuring || ap.jobs.some(j => j.state === 'running')) && !scanning) again(1500);
+  // A clean-up that just finished: say what it did, once.
+  const job = d.caches?.clean;
+  if (job?.state === 'done') {
+    await invoke('storage_clean_seen').catch(() => {});
+    const sum = k => job.results.reduce((t, x) => t + x[k], 0);
+    const freed = sum('freed'), left = sum('left'), held = job.results.filter(x => x.in_use > 0).map(x => x.label);
+    S.stCleanMsg = (freed ? `Cleared ${bytes(freed)} in ${num(sum('files'))} files.` : 'Nothing was cleared.') + (job.cancelled ? ' Stopped before it finished.' : '')
+      + (held.length ? ` ${left ? bytes(left) : 'Some of it'} is still in use and was left (${stList(held)}). Close those programs and clear again to free it.` : '');
+    d.caches.clean = null;
+  }
+  const cleaning = d.caches?.clean?.state === 'running';
+  if (!scanning && (cleaning || d.caches?.measuring)) again(cleaning ? 700 : 1500);
+  // Clean-up that needs no scan: caches, the Recycle Bin, Downloads and what Windows keeps.
+  const onClean = !r || S.stView === 'cleanup';
+  const dl = onClean ? await invoke('storage_downloads', { days: S.stDlDays, limit: S.stDlN }).catch(() => null) : null;
+  if (onClean) S.stDlLast = dl;
+  const sel = stSelected(), selSize = sel.reduce((t, x) => t + x.size, 0);
+  const bar = sel.length ? `<div class="stbar" role="region" aria-label="Selected"><b>${num(sel.length)} selected</b><span class="num">${bytes(selSize)}</span>
+    <label class="perm"><input type="checkbox" class="check" id="stperm" ${S.stPerm ? 'checked' : ''}> Delete for good, without the Recycle Bin</label><span class="grow"></span>
+    <button class="btn" data-action="st-clear">Clear</button><button class="btn danger" data-action="st-delete">${ic('trash')}${S.stPerm ? 'Delete for good' : 'Move to Recycle Bin'}</button></div>` : '';
+  if (!r) return driveTiles + scan + (scanning || offerSaved ? '' : `<div class="empty">Scan your user folder or a whole drive to see what takes the space, biggest or smallest first, and delete what you don't need.</div>`) + stCaches(d) + stDownloads(dl) + stWindows(d) + appsPanel + bar;
+
+
+  const view = S.stView;
+  // When a whole drive was scanned, show how its used space splits up, including what no scan can see.
+  const drv = drives.find(x => (x.mount + '\\').toLowerCase() === String(d.root).toLowerCase().replace(/\\?$/, '\\'));
+  let where = '';
+  if (drv) {
+    const used = drv.total - drv.free, seen = Math.min(used, r.total), unseen = Math.max(0, used - r.total - d.bin.size);
+    const part = (label, v, cls, note) => v > 0 ? `<div class="st-part"><span class="st-sw ${cls}"></span><div class="grow"><b>${label}</b>${note ? `<span class="sub">${note}</span>` : ''}</div><b class="num">${bytes(v)}</b><span class="muted num" style="width:48px;text-align:right">${Math.round(v / used * 100)}%</span></div>` : '';
+    where = `<section class="panel"><div class="panel-head"><h2>Where the ${bytes(used)} on drive ${esc(drv.mount)} goes</h2></div>
+      <div class="st-split" role="img" aria-label="Seen by the scan ${bytes(seen)}, Recycle Bin ${bytes(d.bin.size)}, not readable ${bytes(unseen)}">
+        <i class="seen" style="width:${(seen / used * 100).toFixed(2)}%"></i><i class="bin" style="width:${(d.bin.size / used * 100).toFixed(2)}%"></i><i class="unseen" style="width:${(unseen / used * 100).toFixed(2)}%"></i></div>
+      <div class="panel-body st-parts">
+        ${part('Files the scan found', seen, 'seen', 'Everything below. Open folders, or use Biggest folders, to see what they are.')}
+        ${part('Recycle Bin', d.bin.size, 'bin', 'Empty it under Caches and leftovers.')}
+        ${part('Not readable by apps', unseen, 'unseen', `Mostly restore points and shadow copies in System Volume Information${r.denied ? `, plus ${num(r.denied)} folders that could not be read` : ''}. Windows keeps these for itself. Restore points can be shrunk in System Protection.`)}
+        ${unseen > 1e9 ? `<div class="toolbar" style="margin-top:6px"><button class="btn" data-action="st-restore">Open System Protection</button><button class="btn" data-action="st-winset">Open Windows Storage settings</button></div>` : ''}
+      </div></section>`;
+  }
+  let body = '';
+  if (view === 'biggest') {
+    const bg = await invoke('storage_biggest', { sort: S.stBSort, desc: S.stBDesc, limit: S.stBN });
+    const max = Math.max(1, ...bg.dirs.map(x => S.stBSort === 'own' ? x.own : x.size));
+    const th = (k, label, cls = '', style = '') => stTh(k, label, S.stBSort, S.stBDesc, 'stbsort', cls, style);
+    body = `<section class="panel"><div class="panel-head"><h2>Biggest folders anywhere</h2><span class="hint">Every folder in ${esc(d.root)}, however deep. A folder whose space is nearly all in one subfolder is skipped, so the list points at where the space really is. "Files directly in it" leaves out subfolders.</span></div>
+      <div class="wrap-x"><table class="tbl freeze"><thead><tr><th style="width:28px"></th>${th('name', 'Folder')}${th('modified', 'Changed', 'r opt')}${th('files', 'Files', 'r opt')}${th('own', 'Files directly in it', 'r opt2')}${th('size', 'Size with subfolders', '', 'width:200px')}<th></th></tr></thead><tbody>
+      ${bg.dirs.map(x => `<tr><td>${x.locked ? `<span title="${esc(x.locked)}">${ic('shield')}</span>` : stCheck({ path: x.path, size: x.size, dir: x.id })}</td><td class="wrap"><button class="linkbtn" data-stdir="${x.id}">${ic('folder')}${esc(x.name)}</button>${x.kind ? ` <span class="chip">${esc(x.kind)}</span>` : ''}<span class="sub mono">${esc(x.path)}</span></td><td class="r opt">${day(x.modified)}</td><td class="r num opt">${num(x.files)}</td><td class="r num opt2">${bytes(x.own)}</td><td><div class="barcell"><b>${bytes(x.size)}</b>${meter((S.stBSort === 'own' ? x.own : x.size) / max * 100, true)}</div></td><td class="r">${revealBtn(x.path)}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">No folders.</td></tr>'}
+      </tbody></table></div>${bg.count > bg.dirs.length ? `<div class="panel-body toolbar"><span class="muted grow">Showing ${num(bg.dirs.length)} of ${num(bg.count)}.</span><button class="btn" data-action="st-bmore">Show ${num(Math.min(300, bg.count - bg.dirs.length))} more</button></div>` : ''}</section>`;
+  } else if (view === 'cleanup') {
+    body = stCaches(d) + stDownloads(dl) + stBuilds(r) + stWindows(d);
+  } else if (view === 'dups' && d.dups_busy) {
+    body = `<section class="panel"><div class="panel-head"><h2>Comparing files</h2><span class="hint">Files of the same size are read and compared byte for byte. Everything else is ready to use while this runs.</span></div>
+      <div class="panel-body"><div class="muted">${bytes(d.hashed)} of ${bytes(d.to_hash)} read</div>${meter(d.to_hash ? d.hashed / d.to_hash * 100 : 0, true)}</div></section>`;
+    again(1500);
+  } else if (view === 'dups') {
+    const groups = r.dups.slice(0, S.stDupN);
+    body = `<section class="panel"><div class="panel-head"><h2>${num(r.dup_groups)} sets of identical files</h2><span class="hint">Deleting the extra copies frees ${bytes(r.dup_wasted)}. Files are compared byte for byte (SHA-256). Hard links to one file are not counted, and the last copy is always kept.</span><span class="grow"></span>
+      <button class="btn small" data-action="st-dup-newest" ${groups.length ? '' : 'disabled'}>Keep newest, select the rest</button><button class="btn small" data-action="st-dup-oldest" ${groups.length ? '' : 'disabled'}>Keep oldest, select the rest</button></div>
+      ${groups.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th style="width:28px"></th><th>Copy</th><th class="r opt">Changed</th><th class="r">Size</th><th></th></tr></thead><tbody>
+        ${groups.map((g, gi) => `<tr class="dup-h"><td></td><td colspan="4"><b style="font-weight:600">${esc(g.files[0].name)}</b> <span class="muted">· ${g.files.length} copies of ${bytes(g.size)}, ${bytes(g.size * (g.files.length - 1))} extra</span></td></tr>
+          ${g.files.map(f => `<tr><td>${stCheck({ path: f.path, size: f.size, parent: f.parent }, `data-group="${gi}"`)}</td><td class="wrap"><span class="mono" style="font-size:12px">${esc(f.folder)}</span>${f.name !== g.files[0].name ? `<span class="sub">${esc(f.name)}</span>` : ''}</td><td class="r opt">${day(f.modified)}</td><td class="r num">${bytes(f.size)}</td><td class="r">${revealBtn(f.path)}</td></tr>`).join('')}`).join('')}
+      </tbody></table></div>${r.dups.length > groups.length ? `<div class="panel-body"><button class="btn" data-action="st-more">Show more</button></div>` : r.dup_groups > r.dups.length ? `<p class="note" style="padding:10px 16px">The ${num(r.dups.length)} sets that free the most are shown. Delete some and scan again to see the rest.</p>` : ''}`
+      : `<div class="empty">No duplicate files of ${bytes(r.min_file)} or more.</div>`}</section>`;
+  } else if (view === 'files') {
+    const fl = await invoke('storage_files', { kind: S.stType, q: S.stFQ, sort: S.stFSort, desc: S.stFDesc, limit: S.stFN });
+    const types = r.types || [], tmax = Math.max(1, ...types.map(t => t.size));
+    const typeRows = types.map(t => `<button class="st-type ${S.stType === t.type ? 'on' : ''}" data-sttype="${esc(t.type)}" aria-pressed="${S.stType === t.type}">
+        <span class="st-type-n">${esc(t.type)}</span><span class="st-type-bar"><i style="width:${(t.size / tmax * 100).toFixed(1)}%"></i></span><b class="num">${bytes(t.size)}</b><span class="muted num">${num(t.files)} file${t.files === 1 ? '' : 's'}</span></button>`).join('');
+    const max = Math.max(1, ...fl.files.map(f => f.size));
+    const th = (k, label, cls = '', style = '') => stTh(k, label, S.stFSort, S.stFDesc, 'stfsort', cls, style);
+    body = `<section class="panel"><div class="panel-head"><h2>What kind of files take the space</h2><span class="hint">Click a type to list its files. Counts every file in ${esc(d.root)}.</span></div>
+      <div class="panel-body st-types">${typeRows || '<div class="empty">No files.</div>'}</div></section>
+      <section class="panel"><div class="panel-head"><h2>${S.stType ? esc(S.stType) : 'All files'}</h2><span class="hint">${num(fl.count)} files of ${bytes(r.min_file)} or more, ${bytes(fl.total)} in all.</span><span class="grow"></span>
+        ${S.stType ? `<button class="btn small" data-sttype="">Show every type</button>` : ''}
+        <input class="input" id="stfq" type="search" placeholder="Find a file by name" value="${esc(S.stFQ)}" aria-label="Find a file by name" style="max-width:220px"></div>
+      <div class="wrap-x"><table class="tbl freeze"><thead><tr><th style="width:28px"></th>${th('name', 'File')}<th class="opt">Type</th>${th('modified', 'Changed', 'r opt')}${th('size', 'Size', '', 'width:200px')}<th></th></tr></thead><tbody>
+      ${fl.files.map(f => `<tr><td>${stCheck({ path: f.path, size: f.size, parent: f.parent })}</td><td class="wrap"><b style="font-weight:600">${esc(f.name)}</b><span class="sub mono">${esc(f.folder)}</span></td><td class="opt"><span class="chip">${esc(f.type)}</span></td><td class="r opt">${day(f.modified)}</td><td><div class="barcell"><b>${bytes(f.size)}</b>${meter(f.size / max * 100, true)}</div></td><td class="r">${revealBtn(f.path)}</td></tr>`).join('') || `<tr><td colspan="6" class="empty">${S.stFQ ? 'No file matches.' : 'No files.'}</td></tr>`}
+      </tbody></table></div>${fl.count > fl.files.length ? `<div class="panel-body toolbar"><span class="muted grow">Showing ${num(fl.files.length)} of ${num(fl.count)}.</span><button class="btn" data-action="st-fmore">Show ${num(Math.min(500, fl.count - fl.files.length))} more</button></div>` : ''}</section>`;
+  } else {
+    let f;
+    const args = id => ({ id, sort: S.stSort, desc: S.stDesc });
+    try { f = await invoke('storage_folder', args(S.stDir || 0)); } catch { S.stDir = 0; f = await invoke('storage_folder', args(0)); }
+    const crumbs = f.crumbs.map((c, i) => i === f.crumbs.length - 1 ? `<b>${esc(c.name)}</b>` : `<button class="btn small ghost" data-stdir="${c.id}">${esc(c.name)}</button>`).join('<span class="muted">›</span>');
+    const up = f.crumbs.length > 1 ? `<button class="btn small" data-stdir="${f.crumbs[f.crumbs.length - 2].id}" title="Up one folder">${ic('arrow-up')}Up</button>` : '';
+    const max = Math.max(1, ...f.items.map(x => x.size));
+    const sizeCell = x => `<div class="barcell"><b>${bytes(x.size)}</b>${meter(x.size / max * 100, true)}</div>`;
+    const pct = x => f.size ? `${(x.size / f.size * 100).toFixed(x.size / f.size >= 0.1 ? 0 : 1)}%` : '';
+    const th = (k, label, cls = '', style = '') => stTh(k, label, S.stSort, S.stDesc, 'stsort', cls, style);
+    const row = x => x.dir
+      ? `<tr><td>${x.locked ? `<span title="${esc(x.locked)}">${ic('shield')}</span>` : stCheck({ path: x.path, size: x.size, dir: x.id })}</td><td class="wrap"><button class="linkbtn" data-stdir="${x.id}">${ic('folder')}${esc(x.name)}</button>${x.kind ? ` <span class="chip">${esc(x.kind === 'Windows' ? 'Not scanned' : x.kind)}</span>` : ''}</td><td class="r opt">${day(x.modified)}</td><td class="r num opt">${num(x.files)}</td><td class="r muted num opt2">${pct(x)}</td><td>${sizeCell(x)}</td><td class="r">${revealBtn(x.path)}</td></tr>`
+      : `<tr><td>${x.locked || x.cloud ? `<span title="${esc(x.locked || 'In OneDrive only')}">${ic(x.cloud ? 'download' : 'shield')}</span>` : stCheck({ path: x.path, size: x.size, parent: f.id })}</td><td class="wrap">${esc(x.name)} <span class="chip">${esc(ST_SYSTEM_FILES[x.name.toLowerCase()] ? 'Windows' : x.type)}</span>${x.cloud ? ' <span class="chip">OneDrive only</span>' : ''}${ST_SYSTEM_FILES[x.name.toLowerCase()] ? `<span class="sub">${esc(ST_SYSTEM_FILES[x.name.toLowerCase()])}</span>` : ''}</td><td class="r opt">${day(x.modified)}</td><td class="r opt"></td><td class="r muted num opt2">${pct(x)}</td><td>${sizeCell(x)}</td><td class="r">${revealBtn(x.path)}</td></tr>`;
+    body = `<section class="panel"><div class="panel-head">${up}<div class="crumbs">${crumbs}</div><span class="grow"></span><span class="hint">${bytes(f.size)} in ${num(f.files_total)} files</span></div>
+      ${f.skipped ? '<div class="empty">Windows\' own folder is not scanned. Use Windows Storage settings to clean it.</div>' : `${stMap(f)}<div class="wrap-x"><table class="tbl freeze"><thead><tr><th style="width:28px"></th>${th('name', 'Name')}${th('modified', 'Changed', 'r opt')}${th('files', 'Files', 'r opt')}<th class="r opt2">Share</th>${th('size', 'Size', '', 'width:200px')}<th></th></tr></thead><tbody>
+      ${f.items.map(row).join('') || '<tr><td colspan="7" class="empty">Empty.</td></tr>'}
+      </tbody></table></div>${f.items.length < f.dirs_n + f.files_n ? `<p class="note" style="padding:10px 16px">The first ${num(f.items.length)} of ${num(f.dirs_n + f.files_n)} in this order are shown.</p>` : ''}`}</section>`;
+  }
+  const tabs = seg('stview', [['biggest', 'Biggest folders'], ['folders', 'Browse folders'], ['files', 'Files by type'], ['dups', `Duplicates${d.dups_busy ? ' · comparing' : r.dup_groups ? ' · ' + bytes(r.dup_wasted) : ''}`], ['cleanup', 'Caches and leftovers']], view);
+  // What the scan found comes first; installed apps follow below it.
+  return driveTiles + scan + where + `<div class="toolbar">${tabs}</div>` + body + appsPanel + bar;
+}
+
+function stApps(ap) {
+  const q = S.apQ.trim().toLowerCase();
+  const running = new Map(ap.jobs.map(j => [j.id, j]));
+  const all = ap.apps.filter(a => !q || a.name.toLowerCase().includes(q) || (a.publisher || '').toLowerCase().includes(q));
+  const shown = S.apAll || q ? all : all.slice(0, 15);
+  const max = Math.max(1, ...shown.map(a => a.total));
+  const total = ap.apps.reduce((t, a) => t + a.total, 0);
+  const NL = String.fromCharCode(10);
+  const jobs = ap.jobs.filter(j => j.state !== 'running').map(j => {
+    const left = j.leftovers.reduce((t, x) => t + x.size, 0);
+    const name = `<b style="font-weight:600">${esc(j.name)}</b>`;
+    const text = j.state === 'done' ? `${name} was uninstalled. ${left ? `It left ${bytes(left)} of files behind.` : 'Nothing was left behind.'}`
+      : j.state === 'failed' ? `${name} could not be uninstalled. ${esc(j.msg)}`
+      : `${name}: ${esc(j.msg)}`;
+    return `<div class="apjob ${j.state === 'failed' ? 'crit' : ''}"><div class="grow">${text}${left ? `<pre class="notes" style="max-height:90px;margin-top:6px">${esc(j.leftovers.map(x => `${x.path}  (${bytes(x.size)})`).join(NL))}</pre>` : ''}</div>
+      ${left ? `<button class="btn danger small" data-apleft="${esc(j.id)}">${ic('trash')}Move leftovers to Recycle Bin</button>` : ''}<button class="btn small ghost" data-apdis="${esc(j.id)}">Dismiss</button></div>`;
+  }).join('');
+  const row = a => {
+    const job = running.get(a.id);
+    const how = a.store ? 'Removes this Microsoft Store app' : a.quiet ? 'Uninstalls without more questions' : 'Opens its own uninstaller';
+    const btn = job?.state === 'running' ? `<span class="muted">Uninstalling…</span>` : `<button class="btn small danger" data-apun="${esc(a.id)}" title="${esc(how)}">${ic('trash')}Uninstall</button>`;
+    const sub = [a.publisher, a.version && 'v' + a.version, a.installed && 'installed ' + a.installed].filter(Boolean).join(' · ');
+    return `<tr><td class="wrap"><b style="font-weight:600">${esc(a.name)}</b>${a.store ? ' <span class="chip">Store</span>' : ''}<span class="sub">${esc(sub)}</span></td>
+      <td class="r num opt3">${a.program ? bytes(a.program) : '<span class="muted">?</span>'}</td>
+      <td class="r num opt3" title="${esc(a.data_paths.join(NL))}">${a.data ? bytes(a.data) : '<span class="muted">-</span>'}</td>
+      <td><div class="barcell"><b>${a.total ? bytes(a.total) : '?'}</b>${meter(a.total / max * 100, true)}</div></td>
+      <td class="r" style="white-space:nowrap">${a.location ? revealBtn(a.location) : ''}${btn}</td></tr>`;
+  };
+  return `<section class="panel"><div class="panel-head"><h2>Apps</h2><span class="hint">${num(ap.count)} installed, ${bytes(total)} in all, biggest first. Program is its install folder. Data is what it keeps in AppData.${ap.measuring ? ` Measuring sizes, ${num(ap.measured)} of ${num(ap.count)} done.` : ''}</span><span class="grow"></span>
+      <input class="input" id="apq" type="search" placeholder="Find an app" value="${esc(S.apQ)}" aria-label="Find an app" style="max-width:220px"><button class="btn small" data-action="ap-rescan" ${ap.measuring ? 'disabled' : ''}>Measure again</button></div>
+    ${jobs}
+    <div class="wrap-x"><table class="tbl freeze"><thead><tr><th>App</th><th class="r opt3">Program</th><th class="r opt3">Data</th><th style="width:200px">Total</th><th></th></tr></thead><tbody>
+      ${shown.map(row).join('') || `<tr><td colspan="5" class="empty">${q ? 'No app matches.' : 'Reading installed apps…'}</td></tr>`}
+    </tbody></table></div>
+    ${!q && all.length > 15 ? `<div class="panel-body"><button class="btn" data-action="ap-all">${S.apAll ? 'Show the 15 biggest' : `Show all ${num(all.length)}`}</button></div>` : ''}</section>`;
+}
+
+async function stDelete(items, perm) {
+  toast(`Deleting ${items.length} item${items.length === 1 ? '' : 's'}…`);
+  const r = await act(invoke('storage_delete', { items: items.map(x => ({ path: x.path, dir: x.dir ?? null, parent: x.parent ?? null })), permanent: perm }));
+  if (!r) return;
+  const ok = r.filter(x => x.ok), bad = r.filter(x => !x.ok);
+  for (const x of r) if (x.ok || /no longer exists/.test(x.error || '')) S.stSel.delete(x.path);
+  const freed = ok.reduce((t, x) => t + x.freed, 0);
+  const why = bad.length ? ` ${bad.length} not deleted: ${bad[0].error}` : '';
+  toast(ok.length ? `${perm ? 'Deleted' : 'Moved to the Recycle Bin:'} ${ok.length} item${ok.length === 1 ? '' : 's'}, ${bytes(freed)}.${perm ? '' : ' Empty the Recycle Bin to get the space back.'}${why}` : `Nothing was deleted.${why}`, !ok.length);
 }
 
 async function pcRecordings() {
@@ -582,7 +997,7 @@ async function srvSummary(m) {
   return `
   <div class="tiles">
     ${tile('CPU', pct(p.cpu), `waiting on disk ${pct(p.iowait)} · taken by host ${pct(p.steal)}`, r.map(x => x.cpu), 100)}
-    ${tile('Memory', pct(m.latest.mem_pct), ofBytes(used, total), r.map(x => x.mem_total ? (x.mem_total - x.mem_avail) / x.mem_total * 100 : null), 100)}
+    ${tile('Memory', pct(m.latest.mem_pct), p.arc > 0 ? `${bytes(Math.max(0, total * m.latest.mem_pct / 100))} in programs` : ofBytes(used, total), r.map(x => x.mem_total ? Math.max(0, x.mem_total - x.mem_avail - Math.max(0, (x.arc || 0) - x.mem_total / 32)) / x.mem_total * 100 : null), 100)}
     ${tile('Swap', pct(m.latest.swap_pct), p.swap_total ? ofBytes(p.swap_used, p.swap_total) : 'No swap set up', r.map(x => x.swap_used), p.swap_total || null)}
     ${tile('Load', p.load1.toFixed(2), `5 min ${p.load5.toFixed(2)} · 15 min ${p.load15.toFixed(2)}`, r.map(x => x.load1))}
     ${tile('Network', rate(p.net_rx + p.net_tx), `in ${rate(p.net_rx)} · out ${rate(p.net_tx)}`, r.map(x => x.net_rx + x.net_tx))}
@@ -641,9 +1056,14 @@ async function srvHistory(m) {
     <p class="note">Hover a chart to see the same moment on every chart and what was running. Click to keep the moment open.</p>
     ${lineChart({ id: 's-cpu', title: 'CPU', pts: pick('cpu'), from, to, bucket: b, max: 100, fmt: cpuFmt, group: 's', tip: tipG })}
     ${lineChart({ id: 's-mem', title: 'Memory', pts: pick('mem_pct'), from, to, bucket: b, max: 100, fmt: v => Math.round(v) + '%', group: 's' })}
+    ${P.some(p => p.swap_pct > 0) ? lineChart({ id: 's-swap', title: 'Swap in use', pts: pick('swap_pct'), from, to, bucket: b, max: 100, fmt: v => Math.round(v) + '%', group: 's', h: 70 }) : ''}
     ${lineChart({ id: 's-load', title: 'Load', pts: pick('load1'), from, to, bucket: b, fmt: v => v.toFixed(2), group: 's', h: 80 })}
-    ${lineChart({ id: 's-net', title: 'Network', pts: pick('net'), from, to, bucket: b, fmt: rate, group: 's', h: 80 })}
-    ${lineChart({ id: 's-io', title: 'Disk I/O', pts: pick('disk'), from, to, bucket: b, fmt: rate, group: 's', h: 80 })}
+    ${lineChart({ id: 's-iow', title: 'CPU waiting on disk', pts: pick('iowait'), from, to, bucket: b, fmt: cpuFmt, group: 's', h: 70 })}
+    ${P.some(p => p.steal >= 0.5) ? lineChart({ id: 's-steal', title: 'CPU taken by the host (steal)', pts: pick('steal'), from, to, bucket: b, fmt: cpuFmt, group: 's', h: 70 }) : ''}
+    ${lineChart({ id: 's-rx', title: 'Network in', pts: pick('net_rx'), from, to, bucket: b, fmt: rate, group: 's', h: 70 })}
+    ${lineChart({ id: 's-tx', title: 'Network out', pts: pick('net_tx'), from, to, bucket: b, fmt: rate, group: 's', h: 70 })}
+    ${lineChart({ id: 's-rd', title: 'Disk read', pts: pick('disk_read'), from, to, bucket: b, fmt: rate, group: 's', h: 70 })}
+    ${lineChart({ id: 's-wr', title: 'Disk write', pts: pick('disk_write'), from, to, bucket: b, fmt: rate, group: 's', h: 70 })}
   </div></section>`;
 }
 const srvFindings = async m => `<section class="panel"><div class="findings">${m.findings.length ? m.findings.map(findingRow).join('') : '<div class="empty">Nothing found. This server looks healthy.</div>'}</div></section>`;
@@ -726,7 +1146,19 @@ function dialog(kind, arg) {
   const d = document.getElementById('dialog');
   pendingDialog = { kind, arg };
   const u = S.update;
-  d.innerHTML = kind === 'force' ? `<h3>Force stop ${esc(arg)}?</h3><p>It did not close when asked. Forcing it ends it right away, and any unsaved work in it is lost.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Force stop</button></div>`
+  d.innerHTML = kind === 'stopapp' ? `<h3>Stop ${esc(arg.app)}?</h3><p>This ends ${arg.procs === 1 ? 'its process' : `all ${arg.procs} processes named ${esc(arg.app)}`}, using ${bytes(arg.mem)}.${arg.win ? ' Its windows are asked to close first so it can save.' : ' It has no window, so it is ended right away.'}${arg.procs > 1 ? ' To stop only one of them, use Clean up.' : ''}</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Stop${arg.procs > 1 ? ' all ' + arg.procs : ''}</button></div>`
+    : kind === 'tree' ? `<h3>Stop ${esc(arg.label)}?</h3><p>${arg.procs ? `This ends ${arg.procs} process${arg.procs === 1 ? '' : 'es'} using ${bytes(arg.mem)}: the program and everything it started.` : 'Each one is ended with everything it started.'} Windows are asked to close first so they can save. Other programs with the same name are not touched.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Stop</button></div>`
+    : kind === 'force' ? `<h3>Force stop ${esc(arg)}?</h3><p>It did not close when asked. Forcing it ends it right away, and any unsaved work in it is lost.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Force stop</button></div>`
+    : kind === 'stdelete' ? `<h3>${arg.perm ? 'Delete' : 'Move'} ${arg.items.length} item${arg.items.length === 1 ? '' : 's'} (${bytes(arg.size)})${arg.perm ? ' for good' : ' to the Recycle Bin'}?</h3>
+        <p>${arg.perm ? 'They cannot be restored.' : 'You can restore them from the Recycle Bin. The space comes back when you empty it. If something is too big for the Recycle Bin, Windows asks before deleting it for good.'}</p>
+        <pre class="notes" style="max-height:140px">${esc(arg.items.slice(0, 8).map(x => x.path).join(String.fromCharCode(10)))}${arg.items.length > 8 ? esc(String.fromCharCode(10) + `and ${arg.items.length - 8} more`) : ''}</pre>
+        <div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>${arg.perm ? 'Delete for good' : 'Move to Recycle Bin'}</button></div>`
+    : kind === 'stclean' ? `<h3>Clear ${arg.labels.length} cache${arg.labels.length === 1 ? '' : 's'} (${bytes(arg.size)})?</h3><p>${esc(stList(arg.labels))}. These are deleted for good. Programs download or rebuild what they need, so the first start may be a little slower.</p>
+        ${arg.open.length ? `<p>${esc(stList(arg.open))} ${arg.open.length === 1 ? 'is' : 'are'} open, so the files in use stay. Close ${arg.open.length === 1 ? 'it' : 'them'} first to clear everything.</p>` : ''}
+        ${arg.slow.length ? `<p>${esc(stList(arg.slow))}: getting ${arg.slow.length === 1 ? 'this' : 'these'} back takes a long download or an install step.</p>` : ''}
+        <div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Clear</button></div>`
+    : kind === 'apun' ? `<h3>Uninstall ${esc(arg.name)}?</h3><p>${arg.total ? `It takes about ${bytes(arg.total)}. ` : ''}${arg.store ? 'Windows removes it from this PC.' : arg.quiet ? 'It is removed without more questions.' : 'Its own uninstaller opens. Follow its steps to finish.'}${arg.admin ? ' Windows asks for permission first.' : ''} Files it leaves behind are listed afterwards so you can remove them too.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Uninstall</button></div>`
+    : kind === 'stbin' ? `<h3>Empty the Recycle Bin?</h3><p>${num(arg.items)} items (${bytes(arg.size)}) are deleted for good on every drive.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Empty Recycle Bin</button></div>`
     : kind === 'delete' ? `<h3>Delete this recording?</h3><p>Its samples are removed for good. Other history is kept.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Delete recording</button></div>`
     : `<h3>What's new in ${esc(u.version)}</h3><pre class="notes">${esc(u.notes || 'No notes for this release.')}</pre><div class="row"><button class="btn" data-close>Later</button><button class="btn primary" data-confirm>Install and restart</button></div>`;
   document.getElementById('scrim').classList.add('open');
@@ -736,8 +1168,14 @@ const closeDialog = () => { document.getElementById('scrim').classList.remove('o
 async function confirmDialog() {
   const p = pendingDialog; closeDialog(); if (!p) return;
   if (p.kind === 'force') await stopApp(p.arg, true);
+  if (p.kind === 'stopapp') await stopApp(p.arg.app, false);
+  if (p.kind === 'tree') await stopTree(p.arg.targets, p.arg.reason);
   if (p.kind === 'delete') { await act(invoke('delete_recording', { id: p.arg }), 'Recording deleted'); if (S.recSel === p.arg) S.recSel = null; }
   if (p.kind === 'update') await installUpdate();
+  if (p.kind === 'stdelete') await stDelete(p.arg.items, p.arg.perm);
+  if (p.kind === 'stclean') { S.stCleanMsg = null; if (await act(invoke('storage_clean', { ids: p.arg.ids }))) S.stJunk.clear(); }
+  if (p.kind === 'apun') { if (await act(invoke('apps_uninstall', { id: p.arg.id }))) toast(`Uninstalling ${p.arg.name}…`); }
+  if (p.kind === 'stbin') { const freed = await act(invoke('storage_empty_bin')); if (freed != null) toast(`Recycle Bin emptied, ${bytes(freed)} freed.`); }
   render();
 }
 let toastT;
@@ -760,9 +1198,34 @@ async function stopApp(app, force) {
   if (r.result === 'asked') { S.asked.add(app); toast(`Asked ${app} to close. If it does not close, use Force stop.`); setTimeout(() => render(), 3000); }
   else { S.asked.delete(app); toast(STOP_TEXT[r.result](app), r.result === 'denied'); }
 }
+async function stopTree(targets, reason) {
+  const r = await act(invoke('stop_tree', { targets, force: false, reason: reason || null }));
+  if (!r) return;
+  const ended = r.filter(x => x.result === 'ended' || x.result === 'closed');
+  const asked = r.filter(x => x.result === 'asked'), denied = r.filter(x => x.result === 'denied');
+  const freed = ended.reduce((t, x) => t + (x.mem || 0), 0);
+  for (const k of targets) S.cleanSel.delete(key2(k[0], k[1]));
+  quietRefresh.cleanAt = 0;
+  toast(ended.length ? `Stopped ${ended.length === 1 ? ended[0].name : ended.length + ' items'}, freed about ${bytes(freed)}.${asked.length ? ` ${asked.length} still has a window open, maybe asking to save.` : ''}`
+    : asked.length ? `${asked[0].name} was asked to close and still has a window open. It may be asking to save.`
+    : denied.length ? `Windows did not allow stopping ${denied[0].name}. It may need administrator rights.` : 'It had already stopped.', !ended.length && !!denied.length);
+}
 async function installUpdate() {
   S.update = await act(invoke('install_update')) || S.update;
   pollUpdate();
+}
+
+/* ================= Slow right now ================= */
+// Shown on every page while this PC is struggling, with what is behind it and a way to stop it.
+function pressureBanner() {
+  const pr = S.side?.pressure;
+  if (!pr || S.page === 'settings' || (S.page === 'machine' && S.machine === 'pc' && S.tab === 'cleanup')) return '';
+  const what = pr.kind === 'commit' ? `Committed memory is at ${pct(pr.value)}. When it reaches 100%, apps crash or refuse to open.`
+    : pr.kind === 'mem' ? `Memory is ${pct(pr.value)} full, so Windows is moving things to disk and typing can lag.`
+    : `The processor has been ${pct(pr.value)} busy for the last ${pr.secs} s, so the PC responds slowly.`;
+  return `<div class="pressure" role="status">${ic('alert', 'i fi')}<div class="grow"><b>This PC is slow right now.</b> ${what}
+    <div class="pr-apps">${pr.top.map(a => `<span class="pr-app"><b>${esc(friendly(a))}</b> ${pr.kind === 'cpu' ? pct(a.cpu) + ' CPU' : bytes(pr.kind === 'commit' ? a.private || a.mem : a.mem)}${a.protected ? '' : ` <button class="btn small" data-stopask="${esc(a.app)}" data-procs="${a.procs}" data-mem="${a.mem}" data-win="${a.titles ? 1 : 0}">${ic('stop')}Stop</button>`}</span>`).join('')}</div></div>
+    <button class="btn primary" data-go="machine" data-m="pc" data-t="cleanup">${ic('broom')}Clean up</button></div>`;
 }
 
 /* ================= Render ================= */
@@ -801,6 +1264,7 @@ async function renderPage(gen, scrollTop) {
   if (gen !== renderGen) return;
   clearTimeout(loadT);
   renderSide();
+  html = pressureBanner() + html;
   const changed = setHTML(main, html);
   if (scrollTop) main.scrollTop = 0;
   if (changed) requestAnimationFrame(drawCharts);
@@ -808,6 +1272,10 @@ async function renderPage(gen, scrollTop) {
 }
 // Live pages refresh every 5 s, unless the user is pointing at a chart, typing, or has a dialog open.
 function quietRefresh() {
+  if (document.querySelector('.freeze:hover, .pressure:hover')) return;
+  const onClean = S.page === 'machine' && S.machine === 'pc' && S.tab === 'cleanup';
+  if (onClean && Date.now() - (quietRefresh.cleanAt || 0) < 15000) return;
+  if (onClean) quietRefresh.cleanAt = Date.now();
   if (render.busy || S.smoke || document.hidden || S.hovering || document.getElementById('scrim').classList.contains('open')) return;
   const f = document.activeElement;
   if (f && (f.tagName === 'SELECT' || f.tagName === 'INPUT') && f.type !== 'checkbox') return;
@@ -817,13 +1285,13 @@ setInterval(quietRefresh, 5000);
 
 /* ================= Events ================= */
 document.addEventListener('click', async e => {
-  const t = e.target.closest('button,[data-go],[data-appsel],[data-recsel],[data-pcapp]');
+  const t = e.target.closest('button,[data-go],[data-appsel],[data-recsel],[data-pcapp],[data-gtoggle]');
   if (!t) { if (e.target.id === 'scrim') closeDialog(); return; }
   const ds = t.dataset;
   if (ds.retry !== undefined) { e.stopPropagation(); await act(invoke('server_retry', { alias: ds.retry }), `Trying ${ds.retry} again`); return setTimeout(render, 1500); }
   if (ds.watch !== undefined) { e.stopPropagation(); await act(invoke('server_watch', { alias: ds.watch, on: ds.on === '1' })); return render(); }
   if (ds.recdel !== undefined) { e.stopPropagation(); return dialog('delete', Number(ds.recdel)); }
-  if (ds.go) return go(ds.go, ds.m);
+  if (ds.go) return go(ds.go, ds.m, ds.t);
   if (ds.tab) { S.tab = ds.tab; S.pinned = null; S.sort = S.machine === 'pc' ? 'cpu' : 'mem'; return render(true); }
   if (ds.range) { S.range = Number(ds.range); S.pinned = null; return render(); }
   if (ds.sort) { S.sort = ds.sort; return render(); }
@@ -835,7 +1303,35 @@ document.addEventListener('click', async e => {
   if (ds.recsel !== undefined) { S.recSel = ds.recsel ? Number(ds.recsel) : null; return render(); }
   if (ds.record) { S.tab = 'recordings'; S.recApp = ds.record; return render(true); }
   if (ds.stop) return stopApp(ds.stop, false).then(() => render());
+  if (ds.stopask) {
+    const n = Number(ds.procs), win = ds.win === '1';
+    if (n > 1 || !win) return dialog('stopapp', { app: ds.stopask, procs: n, mem: Number(ds.mem), win });
+    return stopApp(ds.stopask, false).then(() => render());
+  }
+  if (ds.treestop) { const [pid, st] = ds.treestop.split(':').map(Number); return dialog('tree', { targets: [[pid, st]], label: ds.label, procs: Number(ds.procs), mem: Number(ds.mem) }); }
+  if (ds.gtoggle) { const g = Number(ds.gtoggle); S.openGroups.has(g) ? S.openGroups.delete(g) : S.openGroups.add(g); return render(); }
   if (ds.force) return dialog('force', ds.force);
+  if (ds.stview) { S.stView = ds.stview; return render(); }
+  if (ds.stsort) { if (S.stSort === ds.stsort) S.stDesc = !S.stDesc; else { S.stSort = ds.stsort; S.stDesc = ds.stsort !== 'name'; } return render(); }
+  if (ds.stbsort) { if (S.stBSort === ds.stbsort) S.stBDesc = !S.stBDesc; else { S.stBSort = ds.stbsort; S.stBDesc = ds.stbsort !== 'name'; } S.stBN = 200; return render(); }
+  if (ds.stfsort) { if (S.stFSort === ds.stfsort) S.stFDesc = !S.stFDesc; else { S.stFSort = ds.stfsort; S.stFDesc = ds.stfsort !== 'name'; } S.stFN = 200; return render(); }
+  if (ds.sttype !== undefined) { S.stType = S.stType === ds.sttype ? '' : ds.sttype; S.stFN = 200; return render(); }
+  if (ds.stmapsel !== undefined) {
+    const path = ds.stmapsel;
+    if (S.stSel.has(path)) S.stSel.delete(path); else S.stSel.set(path, { path, size: Number(ds.size), dir: null, parent: Number(ds.parent) });
+    return render();
+  }
+  if (ds.stdir !== undefined) { S.stDir = Number(ds.stdir); S.stView = 'folders'; return render(); }
+  if (ds.stjopen) { S.stJunkOpen.has(ds.stjopen) ? S.stJunkOpen.delete(ds.stjopen) : S.stJunkOpen.add(ds.stjopen); return render(); }
+  if (ds.stjall) { S.stJunkAll.has(ds.stjall) ? S.stJunkAll.delete(ds.stjall) : S.stJunkAll.add(ds.stjall); return render(); }
+  if (ds.apun) { const a = S.apLast?.apps.find(x => x.id === ds.apun); return a ? dialog('apun', a) : undefined; }
+  if (ds.apdis) { await act(invoke('apps_dismiss', { id: ds.apdis })); return render(); }
+  if (ds.apleft) {
+    const j = S.apLast?.jobs.find(x => x.id === ds.apleft); if (!j) return;
+    await stDelete(j.leftovers.map(x => ({ path: x.path, size: x.size })), false);
+    await act(invoke('apps_dismiss', { id: j.id })); return render();
+  }
+  if (ds.streveal !== undefined) return act(invoke('storage_reveal', { path: ds.streveal }));
   if (ds.recstop) { await act(invoke('stop_recording', { id: Number(ds.recstop) }), 'Recording saved'); return render(); }
   if (ds.dialog) return dialog(ds.dialog);
   if (t.hasAttribute('data-close')) return closeDialog();
@@ -848,6 +1344,68 @@ document.addEventListener('click', async e => {
     case 'rec-start': {
       const app = document.getElementById('recapp')?.value; if (!app) return;
       await act(invoke('start_recording', { appName: app, minutes: S.recMinutes || null }), `Recording ${app}`);
+      return render();
+    }
+    case 'clean-selected': {
+      const targets = [...S.cleanSel].map(k => k.split(':').map(Number));
+      if (!targets.length) return;
+      return dialog('tree', { targets, label: `${targets.length} selected item${targets.length === 1 ? '' : 's'}`, procs: null, mem: null, reason: 'Suggested clean-up' });
+    }
+    case 'st-scan': {
+      const root = document.getElementById('stroot')?.value || S.stRoot;
+      S.stRoot = root; S.stSel.clear(); S.stJunk.clear(); S.stDir = 0; S.stDupN = 100;
+      await act(invoke('storage_scan', { root }));
+      return render();
+    }
+    case 'st-open': {
+      const root = document.getElementById('stroot')?.value || S.stRoot;
+      S.stRoot = root; S.stSel.clear(); S.stJunk.clear(); S.stDir = 0; S.stDupN = 100;
+      toast('Opening saved results…');
+      await act(invoke('storage_open_saved', { root }), 'Saved results opened.');
+      return render();
+    }
+    case 'st-cancel': await act(invoke('storage_cancel')); return setTimeout(render, 300);
+    case 'st-clear': S.stSel.clear(); return render();
+    case 'st-more': S.stDupN += 100; return render();
+    case 'st-fmore': S.stFN += 500; return render();
+    case 'st-bmore': S.stBN += 300; return render();
+    case 'st-restore': return act(invoke('storage_restore_points'));
+    case 'st-delete': {
+      const items = stSelected(); if (!items.length) return;
+      return dialog('stdelete', { items, size: items.reduce((t, x) => t + x.size, 0), perm: S.stPerm });
+    }
+    case 'st-clean': {
+      const junk = stJunkList(S.stLast).filter(j => S.stJunk.has(j.id)); if (!junk.length) return;
+      return dialog('stclean', { ids: junk.map(j => j.id), labels: junk.map(j => j.label), size: junk.reduce((t, j) => t + j.size, 0), open: junk.filter(j => j.running).map(j => j.running), slow: junk.filter(j => !j.rec).map(j => j.label) });
+    }
+    case 'st-clean-cancel': await act(invoke('storage_clean_cancel')); return render();
+    case 'st-clean-ok': S.stCleanMsg = null; return render();
+    case 'st-remeasure': await act(invoke('storage_remeasure')); return render();
+    case 'st-selrec': {
+      const rec = stJunkList(S.stLast).filter(j => j.rec);
+      if (rec.every(j => S.stJunk.has(j.id))) S.stJunk.clear(); else for (const j of rec) S.stJunk.add(j.id);
+      return render();
+    }
+    case 'st-dl-setup': case 'st-dl-all': {
+      for (const x of S.stDlLast?.items || []) if (ds.action === 'st-dl-all' || x.setup) S.stSel.set(x.path, { path: x.path, size: x.size, dir: null, parent: null });
+      return render();
+    }
+    case 'st-dl-more': S.stDlN += 100; return render();
+    case 'st-build-old': {
+      const cut = nowS() - S.stBuildDays * 86400;
+      for (const b of (S.stLast?.result?.builds || []).slice(0, 200)) if (b.project < cut) S.stSel.set(b.path, { path: b.path, size: b.size, dir: b.id, parent: null });
+      return render();
+    }
+    case 'ap-all': S.apAll = !S.apAll; return render();
+    case 'ap-rescan': await act(invoke('apps_rescan')); return render();
+    case 'st-bin': return dialog('stbin', S.stLast?.bin || { items: 0, size: 0 });
+    case 'st-winset': return act(invoke('storage_windows_settings'));
+    case 'st-dup-newest': case 'st-dup-oldest': {
+      const newest = ds.action === 'st-dup-newest';
+      for (const g of (S.stLast?.result?.dups || []).slice(0, S.stDupN)) {
+        const keep = g.files.reduce((a, b) => (newest ? b.modified > a.modified : b.modified < a.modified) ? b : a);
+        for (const f of g.files) { if (f === keep) S.stSel.delete(f.path); else S.stSel.set(f.path, { path: f.path, size: f.size, parent: f.parent }); }
+      }
       return render();
     }
     case 'check': S.update = await act(invoke('check_update')) || S.update; pollUpdate(); return render();
@@ -863,6 +1421,31 @@ document.addEventListener('change', async e => {
   if (t.id === 'ffilter') { S.filter = t.value; t.blur(); return render(); }
   if (t.id === 'histapp') { S.histApp = t.value; S.pinned = null; t.blur(); return render(); }
   if (t.id === 'recapp') { S.recApp = t.value; t.blur(); }
+  if (t.dataset.stsel !== undefined) {
+    const path = t.dataset.stsel;
+    if (t.checked && t.dataset.group !== undefined && [...document.querySelectorAll(`[data-group="${t.dataset.group}"]`)].every(b => b.checked)) {
+      t.checked = false; return toast('Keep at least one copy. Every copy of this file was selected.', true);
+    }
+    if (t.checked) S.stSel.set(path, { path, size: Number(t.dataset.size), dir: t.dataset.dir != null ? Number(t.dataset.dir) : null, parent: t.dataset.parent != null ? Number(t.dataset.parent) : null });
+    else S.stSel.delete(path);
+    return render();
+  }
+  if (t.dataset.jsel) { t.checked ? S.stJunk.add(t.dataset.jsel) : S.stJunk.delete(t.dataset.jsel); return render(); }
+  if (t.id === 'stperm') { S.stPerm = t.checked; return render(); }
+  if (t.id === 'stroot') { S.stRoot = t.value; t.blur(); return render(); }
+  if (t.id === 'stdldays') { S.stDlDays = Number(t.value); S.stDlN = 50; t.blur(); return render(); }
+  if (t.id === 'stbdays') { S.stBuildDays = Number(t.value); t.blur(); return render(); }
+  if (t.dataset.csel) { t.checked ? S.cleanSel.add(t.dataset.csel) : S.cleanSel.delete(t.dataset.csel); quietRefresh.cleanAt = 0; return render(); }
+  if (t.id === 'autoclean') { await act(invoke('set_auto_cleanup', { on: t.checked, minutes: null }), t.checked ? 'Left-over helpers will be stopped automatically' : 'Automatic clean-up is off'); quietRefresh.cleanAt = 0; return render(); }
+  if (t.id === 'automin') { await act(invoke('set_auto_cleanup', { on: !!document.getElementById('autoclean')?.checked, minutes: Number(t.value) })); t.blur(); quietRefresh.cleanAt = 0; return render(); }
+});
+let runT;
+document.addEventListener('input', e => {
+  const id = e.target.id;
+  if (id !== 'runq' && id !== 'apq' && id !== 'stfq') return;
+  if (id === 'apq') S.apQ = e.target.value; else if (id === 'stfq') { S.stFQ = e.target.value; S.stFN = 200; } else S.runQuery = e.target.value;
+  clearTimeout(runT);
+  runT = setTimeout(async () => { await render(); const el = document.getElementById(id); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }, 150);
 });
 addEventListener('keydown', e => { if (e.key === 'Escape' && pendingDialog) closeDialog(); });
 
@@ -933,7 +1516,7 @@ async function smokeRun() {
   };
   await visit('overview', { page: 'overview', machine: null });
   await visit('findings', { page: 'findings', machine: null, range: 604800 });
-  for (const tab of ['now', 'history', 'apps', 'running', 'recordings', 'insights']) await visit('pc ' + tab, { page: 'machine', machine: 'pc', tab, range: 86400 });
+  for (const tab of ['now', 'cleanup', 'storage', 'history', 'apps', 'running', 'recordings', 'insights']) await visit('pc ' + tab, { page: 'machine', machine: 'pc', tab, range: 86400 });
   const app = (S.pcHead?.apps || [])[0]?.app;
   if (app) await visit('pc history ' + app, { page: 'machine', machine: 'pc', tab: 'history', histApp: app });
   await visit('pc history pinned', { page: 'machine', machine: 'pc', tab: 'history', histApp: '', range: 21600 });
