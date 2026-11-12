@@ -151,13 +151,30 @@ pub fn stop(app: &str, force: bool) -> StopResult {
         true,
         ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet),
     );
-    let matching: Vec<&sysinfo::Process> = sys
+    let named: Vec<&sysinfo::Process> = sys
         .processes()
         .values()
         .filter(|p| p.name().to_string_lossy() == app)
         .collect();
-    if matching.is_empty() {
+    if named.is_empty() {
         return StopResult::NotRunning;
+    }
+    // A process started by JPerformance Unified itself (its own window's WebView2) is not stopped.
+    let me = std::process::id();
+    let inside_us = |p: &sysinfo::Process| {
+        let mut cur = p.parent();
+        for _ in 0..16 {
+            match cur {
+                Some(pp) if pp.as_u32() == me => return true,
+                Some(pp) => cur = sys.process(pp).and_then(|x| x.parent()),
+                None => return false,
+            }
+        }
+        false
+    };
+    let matching: Vec<&sysinfo::Process> = named.iter().copied().filter(|p| !inside_us(p)).collect();
+    if matching.is_empty() {
+        return StopResult::Protected;
     }
     let exe = matching.iter().find_map(|p| p.exe()).map(|e| e.display().to_string());
     if is_protected(app, exe.as_deref()) {

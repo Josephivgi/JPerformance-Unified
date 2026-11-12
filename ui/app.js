@@ -5,7 +5,7 @@ const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
 
 /* ================= Icons ================= */
 const I = {
-  logo: '<svg viewBox="0 0 24 24"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg>',
+  logo: '<span>JPU</span>',
   grid: '<path d="M2.5 2.5h4.5v4.5H2.5zM9 2.5h4.5v4.5H9zM2.5 9h4.5v4.5H2.5zM9 9h4.5v4.5H9z"/>',
   alert: '<path d="M8 1.8 14.6 13.5H1.4z"/><path d="M8 6.2v3.3M8 11.6v.1"/>',
   info: '<circle cx="8" cy="8" r="6.3"/><path d="M8 7.2v4M8 4.9v.1"/>',
@@ -81,7 +81,7 @@ const RANGES = [[3600, 'Hour'], [21600, '6 h'], [86400, 'Day'], [604800, 'Week']
 const S = {
   page: 'overview', machine: null, tab: 'now', range: 86400, sort: 'cpu', appSel: null,
   histApp: '', pinned: null, filter: 'all', srvKind: 'all', recSel: null, recMinutes: 30,
-  asked: new Set(), side: null, update: { state: 'idle' }, theme: 'system',
+  asked: new Map(), side: null, update: { state: 'idle' }, theme: 'system',
   cleanSel: new Set(), cleanSeen: new Set(), openGroups: new Set(), runQuery: '',
   stSel: new Map(), stJunk: new Set(), apQ: '', apAll: false, stView: 'biggest', stBSort: 'size', stBDesc: true, stBN: 200, stDir: 0, stSort: 'size', stDesc: true, stFSort: 'size', stFDesc: true, stType: '', stFQ: '', stFN: 200, stRoot: null, stPerm: false, stDupN: 100,
   stJunkOpen: new Set(), stJunkAll: new Set(), stCleanMsg: null, stDlDays: 90, stDlN: 50, stDlLast: null, stBuildDays: 30,
@@ -291,14 +291,14 @@ async function pageOverview() {
   const d = await invoke('overview');
   const pc = d.pc, servers = d.servers;
   const attn = d.findings.filter(f => f.level !== 'info');
-  S.attn = attn.length;
+  if (S.page === 'overview') S.attn = attn.length;
   const pcLatest = pc.latest?.point;
   const memTotal = pc.latest?.mem_total || 0;
   const disk = pc.disks[0];
   const watchedS = servers.filter(s => s.server.enabled);
   const okS = watchedS.filter(s => !s.failed && s.latest);
   const n = 1 + watchedS.length;
-  const pcRow = `<tr data-go="machine" data-m="pc">
+  const pcRow = `<tr tabindex="0" data-go="machine" data-m="pc">
       <td><div class="mname"><b>${esc(pc.host.name)}</b><span class="line2"><span class="kind">${ic('pc')}This PC</span></span></div></td>
       <td><div class="cellv"><div class="top"><b class="num">${pct(pcLatest?.cpu)}</b><span>${pc.host.cores} threads</span></div>${spark(pc.cpu_hour.map(p => p[1]), 100)}</div></td>
       <td><div class="cellv"><div class="top"><b class="num">${pct(pcLatest?.mem_pct)}</b><span>${ofBytes(pcLatest?.mem_used, memTotal)}</span></div>${meter(pcLatest?.mem_pct)}</div></td>
@@ -307,11 +307,11 @@ async function pageOverview() {
       <td><div class="cellv">${pc.top_mem ? `<span class="ell" title="${esc(pc.top_mem.app)}">${esc(pc.top_mem.app)}</span><span class="muted num" style="font-size:11.5px">${bytes(pc.top_mem.mem)} of memory</span>` : '<span class="muted">–</span>'}</div></td></tr>`;
   const srvRow = s => {
     const name = `<td><div class="mname"><b>${esc(s.alias)}</b><span class="line2"><span class="kind">${ic('server')}Server</span>${statusText(s.server.enabled ? s : { enabled: false })}</span>${s.via ? `<span class="line2"><span class="chip">via ${esc(s.via)}</span></span>` : ''}</div></td>`;
-    if (!s.server.enabled) return `<tr data-go="machine" data-m="${esc(s.alias)}">${name}<td colspan="4"><span class="muted">Not being watched. Its history is kept.</span></td><td><button class="btn small" data-watch="${esc(s.alias)}" data-on="1">${ic('play')}Resume</button></td></tr>`;
-    if (s.failed) return `<tr data-go="machine" data-m="${esc(s.alias)}">${name}<td colspan="4"><div class="offline-cell">${esc(s.hint || s.server.detail)} Last checked ${ago(s.server.checked_at)}.</div></td><td><button class="btn small" data-retry="${esc(s.alias)}">${ic('refresh')}Retry now</button></td></tr>`;
+    if (!s.server.enabled) return `<tr tabindex="0" data-go="machine" data-m="${esc(s.alias)}">${name}<td colspan="4"><span class="muted">Not being watched. Its history is kept.</span></td><td><button class="btn small" data-watch="${esc(s.alias)}" data-on="1">${ic('play')}Resume</button></td></tr>`;
+    if (s.failed) return `<tr tabindex="0" data-go="machine" data-m="${esc(s.alias)}">${name}<td colspan="4"><div class="offline-cell">${esc(s.hint || s.server.detail)} Last checked ${ago(s.server.checked_at)}.</div></td><td><button class="btn small" data-retry="${esc(s.alias)}">${ic('refresh')}Retry now</button></td></tr>`;
     const p = s.latest?.point;
-    if (!p) return `<tr data-go="machine" data-m="${esc(s.alias)}">${name}<td colspan="5"><span class="muted">Logging in. The first readings show up within a few seconds.</span></td></tr>`;
-    return `<tr data-go="machine" data-m="${esc(s.alias)}">${name}
+    if (!p) return `<tr tabindex="0" data-go="machine" data-m="${esc(s.alias)}">${name}<td colspan="5"><span class="muted">Logging in. The first readings show up within a few seconds.</span></td></tr>`;
+    return `<tr tabindex="0" data-go="machine" data-m="${esc(s.alias)}">${name}
       <td><div class="cellv"><div class="top"><b class="num">${pct(p.cpu)}</b><span>${s.server.cores} cores</span></div>${spark(s.cpu_hour.map(q => q[1]), 100)}</div></td>
       <td><div class="cellv"><div class="top"><b class="num">${pct(s.latest.mem_pct)}</b><span>${ofBytes(s.latest.mem_used, p.mem_total)}</span></div>${meter(s.latest.mem_pct)}</div></td>
       <td><div class="cellv">${s.fullest ? `<div class="top"><b class="num">${Math.round(s.fullest.pct)}%</b><span>${esc(s.fullest.mount)} ${bytes(s.fullest.avail)} free</span></div>${meter(s.fullest.pct)}` : '<span class="muted">–</span>'}</div></td>
@@ -324,9 +324,10 @@ async function pageOverview() {
   const disks = [...(disk ? [{ pct: disk.pct, where: `${disk.mount} on ${pc.host.name}`, free: disk.free }] : []), ...okS.filter(s => s.fullest).map(s => ({ pct: s.fullest.pct, where: `${s.fullest.mount} on ${s.alias}`, free: s.fullest.avail }))];
   const fullest = disks.length ? disks.reduce((a, b) => b.pct > a.pct ? b : a) : null;
   const down = watchedS.filter(s => s.failed);
+  const upN = watchedS.filter(s => !s.failed && s.latest && s.server.status === 'up').length;
   const first = n === 1
     ? `<div><div class="k">Recording</div><div class="v">${d.recorder ? 'On' : 'Off'}</div><div class="d">${d.recorder ? 'Every 5 s, even with this window closed' : 'Start it from the sidebar'}</div></div>`
-    : `<div><div class="k">Online</div><div class="v ${down.length ? 'crit' : ''}">${n - down.length} of ${n}</div><div class="d">${down.length ? `${esc(down[0].alias)} is not answering` : 'Everything answers'}</div></div>`;
+    : `<div><div class="k">Online</div><div class="v ${down.length ? 'crit' : ''}">${upN + 1} of ${n}</div><div class="d">${down.length ? `${esc(down[0].alias)} is not answering` : (upN + 1 < n ? 'Some are still connecting' : 'Everything answers')}</div></div>`;
   return head('Overview', `<span>${n === 1 ? 'This PC' : `This PC and ${n - 1} server${n === 2 ? '' : 's'}`}</span><span>Updated ${hm(new Date())}</span>`, `<button class="btn" data-action="refresh">${ic('refresh')}Refresh</button>`) + `
   <div class="body">
     <div class="summary">
@@ -353,7 +354,7 @@ async function pageFindings() {
   const machines = [...new Map(list.map(f => [f.machine_id, f.machine])).entries()];
   if (S.filter !== 'all' && !machines.some(([id]) => id === S.filter)) machines.push([S.filter, S.filter === 'pc' ? 'This PC' : S.filter]);
   const shown = list.filter(f => S.filter === 'all' || f.machine_id === S.filter);
-  if (S.range === 86400) S.attn = list.filter(f => f.level !== 'info').length;
+  if (S.range === 86400 && S.page === 'findings') S.attn = list.filter(f => f.level !== 'info').length;
   return head('Findings', 'Plain explanations of what slowed a machine down, when, and why. Worst first.') + `
   <div class="body">
     <div class="toolbar"><span class="lbl">Machine</span><select class="select" id="ffilter"><option value="all">All machines</option>${machines.map(([id, name]) => `<option value="${esc(id)}" ${S.filter === id ? 'selected' : ''}>${esc(name)}</option>`).join('')}</select>
@@ -366,8 +367,8 @@ async function pageFindings() {
 const cpuFmt = (v, axis) => axis ? Math.round(v) + '%' : pct(v);
 async function pagePC() {
   const t = { now: pcNow, cleanup: pcCleanup, storage: pcStorage, history: pcHistory, apps: pcApps, running: pcRunning, recordings: pcRecordings, insights: pcInsights }[S.tab] || pcNow;
-  const [body, now] = await Promise.all([t(), S.pcHead ? Promise.resolve(S.pcHead) : invoke('pc_now')]);
-  if (!S.pcHead || S.tab === 'now') S.pcHead = now;
+  const [body, now] = await Promise.all([t(), invoke('pc_now')]);
+  S.pcHead = now;
   const h = S.pcHead.host, total = S.pcHead.latest?.mem_total;
   const tabs = [['now', 'Now'], ['cleanup', 'Clean up', S.side?.cleanup_n || null], ['storage', 'Storage'], ['history', 'History'], ['apps', 'Apps'], ['running', 'Running', S.pcHead.apps.length], ['recordings', 'Recordings'], ['insights', 'Insights']];
   const sub = `<span>${esc(h.os)}</span><span>${h.cores} threads</span>${total ? `<span>${bytes(total)} memory</span>` : ''}<span>Up ${dur(h.uptime)}</span>`;
@@ -394,7 +395,7 @@ async function pcNow() {
     <div class="panel-head"><h2>Using the most right now</h2><span class="grow"></span><span class="lbl muted">Sort by</span>
       ${seg('sort', [['cpu', 'CPU'], ['mem', 'Memory'], ['io', 'I/O']], S.sort)}</div>
     <div class="wrap-x" style="margin-top:10px"><table class="tbl freeze"><thead><tr><th>App</th><th class="r">CPU</th><th class="r">Memory</th><th class="r">Disk and file I/O</th><th class="r">Processes</th><th></th></tr></thead><tbody>
-    ${rows.map(a => `<tr class="click" data-pcapp="${esc(a.app)}"><td><b style="font-weight:600">${esc(friendly(a))}</b><span class="sub">${esc(a.app)} · ${esc(a.explain || a.name)}</span></td>
+    ${rows.map(a => `<tr tabindex="0" class="click" data-pcapp="${esc(a.app)}"><td><b style="font-weight:600">${esc(friendly(a))}</b><span class="sub">${esc(a.app)} · ${esc(a.explain || a.name)}</span></td>
       <td class="r"><div class="barcell"><b>${pct(a.cpu)}</b>${meter(a.cpu / maxCpu * 100, true)}</div></td>
       <td class="r"><div class="barcell"><b>${bytes(a.mem)}</b>${meter(a.mem / maxMem * 100, true)}</div></td>
       <td class="r num">${rate(a.io_rate)}</td><td class="r num">${a.procs}</td><td class="r">${stopBtn(a)}</td></tr>`).join('')}
@@ -407,7 +408,7 @@ const friendly = a => (a.name && a.name.toLowerCase() !== a.app.toLowerCase().re
 // Stop asks first when it ends many processes or ones without a window (they cannot be asked to save).
 function stopBtn(a) {
   if (a.protected) return '<span class="muted" style="font-size:12px">Part of Windows</span>';
-  if (S.asked.has(a.app)) return `<button class="btn small danger" data-force="${esc(a.app)}">Force stop</button>`;
+  if (Date.now() - (S.asked.get(a.app) || 0) < 120000) return `<button class="btn small danger" data-force="${esc(a.app)}">Force stop</button>`;
   return `<button class="btn small" data-stopask="${esc(a.app)}" data-procs="${a.procs}" data-mem="${a.mem}" data-win="${a.titles ? 1 : 0}">${ic('stop')}Stop</button>`;
 }
 
@@ -485,7 +486,7 @@ async function pcApps() {
   <div class="toolbar"><span class="lbl">Rank by</span>${seg('sort', [['cpu', 'CPU'], ['mem', 'Memory'], ['io', 'I/O']], S.sort)}<span class="grow"></span>${rangePicker()}</div>
   <div class="cols">
     <section class="panel"><div class="wrap-x"><table class="tbl"><thead><tr><th>App</th><th class="r">${key === 'cpu_load' ? 'Average CPU' : key === 'mem_avg' ? 'Average memory' : 'Read and written'}</th><th class="r">Share</th></tr></thead><tbody>
-      ${apps.slice(0, 60).map(a => `<tr class="click ${a.app === S.appSel ? 'sel' : ''}" data-appsel="${esc(a.app)}"><td><b style="font-weight:600">${esc(a.app)}</b><span class="sub">${esc(a.explain || a.name)}</span></td>
+      ${apps.slice(0, 60).map(a => `<tr tabindex="0" class="click ${a.app === S.appSel ? 'sel' : ''}" data-appsel="${esc(a.app)}"><td><b style="font-weight:600">${esc(a.app)}</b><span class="sub">${esc(a.explain || a.name)}</span></td>
       <td class="r"><div class="barcell"><b>${shown(a)}</b>${meter(a[key] / max * 100, true)}</div></td><td class="r num">${Math.round(a[key] / (key === 'cpu_load' ? totalLoad : totalKey) * 100)}%</td></tr>`).join('')}
     </tbody></table></div>
     <p class="note" style="padding:10px 16px 14px">CPU is a share of the whole processor, so 100% means every core is busy. Processes with the same name count as one app. Average CPU is over the minutes the app was running.</p></section>
@@ -538,7 +539,7 @@ async function pcCleanup() {
   const groups = d.groups.slice(0, 30).map(g => {
     const open = S.openGroups.has(g.pid);
     const name = g.title ? `${esc(g.title)}<span class="sub">${esc(g.label)}</span>` : esc(g.label);
-    return `<tr class="${g.branches.length ? 'click' : ''}" ${g.branches.length ? `data-gtoggle="${g.pid}"` : ''}><td>${g.branches.length ? `<span class="caret ${open ? 'open' : ''}">›</span>` : '<span class="tree-ind"></span>'}<b style="font-weight:600">${name}</b>${g.branches.length ? ` <span class="chip">${g.branches.length} inside</span>` : ''}</td>
+    return `<tr ${g.branches.length ? 'tabindex="0" ' : ''}class="${g.branches.length ? 'click' : ''}" ${g.branches.length ? `data-gtoggle="${g.pid}"` : ''}><td>${g.branches.length ? `<span class="caret ${open ? 'open' : ''}">›</span>` : '<span class="tree-ind"></span>'}<b style="font-weight:600">${name}</b>${g.branches.length ? ` <span class="chip">${g.branches.length} inside</span>` : ''}</td>
       <td class="r num">${g.sum.procs}</td><td class="r num">${pct(g.sum.cpu)}</td><td class="r num">${bytes(g.sum.mem)}</td><td class="r">${idleText(g.sum.idle)}</td>
       <td class="r"><button class="btn small" data-treestop="${key2(g.pid, g.started)}" data-label="${esc(g.title || g.label)}" data-procs="${g.sum.procs}" data-mem="${g.sum.mem}">${ic('stop')}Stop all</button></td></tr>
       ${open ? g.branches.map(branchRow).join('') : ''}`;
@@ -557,7 +558,7 @@ async function pcCleanup() {
   <section class="panel"><div class="panel-head"><h2>What each app is running</h2><span class="hint">Every process is counted under the app that started it. Open an app to stop one session or helper on its own.</span></div>
     <div class="wrap-x"><table class="tbl freeze"><thead><tr><th>App</th><th class="r">Processes</th><th class="r">CPU</th><th class="r">Memory</th><th class="r">Last active</th><th></th></tr></thead><tbody>${groups}</tbody></table></div></section>
   <section class="panel"><div class="panel-head"><h2>Automatic clean-up</h2></div><div class="set-list" style="margin-top:4px">
-    <div class="set-row"><div><div class="t">Stop left-over helpers on their own</div><div class="d">The recorder checks once a minute and ends small helpers (node, python, shells) whose app has closed, once they have been idle for the time below. Never anything with a window, anything that looks like a server, anything of Windows, or other users' processes. Off by default.</div></div><label class="switch"><input type="checkbox" id="autoclean" ${d.auto ? 'checked' : ''} aria-label="Stop left-over helpers on their own"><span></span></label></div>
+    <div class="set-row"><div><div class="t">Stop left-over helpers on their own</div><div class="d">The recorder checks once a minute and ends idle shells (cmd, PowerShell, bash) left over from closed apps, once they have been idle for the time below. Never anything with a window, anything that looks like a server, anything of Windows, or other users' processes. Off by default.</div></div><label class="switch"><input type="checkbox" id="autoclean" ${d.auto ? 'checked' : ''} aria-label="Stop left-over helpers on their own"><span></span></label></div>
     <div class="set-row"><div><div class="t">Idle for at least</div><div class="d">${d.auto ? 'Right now this would stop' : 'If it were on, it would stop'} ${autoN} item${autoN === 1 ? '' : 's'} right now.</div></div><select class="select" id="automin">${[10, 15, 30, 60].map(n => `<option value="${n}" ${d.auto_minutes === n ? 'selected' : ''}>${n} minutes</option>`).join('')}</select></div>
   </div><div class="panel-body"><div class="muted" style="font-size:12px;margin-bottom:4px">Recently stopped</div>${log}</div></section>`;
 }
@@ -686,7 +687,7 @@ function stDownloads(dl) {
   if (!dl.ready) return dl.busy ? '<section class="panel"><div class="panel-head"><h2>Downloads folder</h2></div><div class="empty">Measuring Downloads…</div></section>' : '';
   const max = Math.max(1, ...dl.items.map(x => x.size));
   const row = x => `<tr><td>${stCheck({ path: x.path, size: x.size })}</td><td class="wrap"><b style="font-weight:600">${esc(x.name)}</b>${x.dir ? `<span class="sub">${num(x.files)} file${x.files === 1 ? '' : 's'} inside</span>` : ''}</td><td class="opt"><span class="chip">${esc(x.type)}</span></td><td class="r opt">${day(x.modified)}</td><td><div class="barcell"><b>${bytes(x.size)}</b>${meter(x.size / max * 100, true)}</div></td><td class="r">${revealBtn(x.path)}</td></tr>`;
-  return `<section class="panel"><div class="panel-head"><h2>Downloads folder</h2><span class="hint">${bytes(dl.size)} in ${num(dl.count)} items. Installers and archives you no longer need pile up here. What you pick goes to the Recycle Bin.</span><span class="grow"></span>
+  return `<section class="panel"><div class="panel-head"><h2>Downloads folder</h2><span class="hint">${bytes(dl.size)} in ${num(dl.count)} items. Installers and archives you no longer need pile up here. ${S.stPerm ? 'What you pick is deleted for good.' : 'What you pick goes to the Recycle Bin.'}</span><span class="grow"></span>
       <select class="select" id="stdldays" aria-label="Which downloads to list">${ST_AGES.map(([v, l]) => `<option value="${v}" ${S.stDlDays === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
       <button class="btn small" data-action="st-dl-setup" ${dl.items.some(x => x.setup) ? '' : 'disabled'}>Select installers and archives</button><button class="btn small" data-action="st-dl-all" ${dl.items.length ? '' : 'disabled'}>Select all listed</button></div>
     ${dl.items.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th style="width:28px"></th><th>Name</th><th class="opt">Kind</th><th class="r opt">Last changed</th><th style="width:200px">Size</th><th></th></tr></thead><tbody>${dl.items.map(row).join('')}</tbody></table></div>
@@ -733,7 +734,9 @@ async function pcStorage() {
   const drives = [...d.drives].sort((a, b) => a.mount.localeCompare(b.mount));
   const roots = [...drives.map(x => [x.mount + '\\', `Drive ${x.mount}, all of it`]), [d.home, `Your user folder (${d.home})`]];
   const sysDrive = drives.find(x => x.mount.toUpperCase() === 'C:') || drives[0];
-  const root = S.stRoot || d.root || d.saved?.[0]?.root || (sysDrive ? sysDrive.mount + '\\' : d.home);
+  // With nothing picked yet, start on the newest saved scan of a drive or the user folder, not of some small folder.
+  const savedMain = (d.saved || []).find(x => roots.some(([v]) => stNorm(v) === stNorm(x.root)));
+  const root = S.stRoot || d.root || savedMain?.root || (sysDrive ? sysDrive.mount + '\\' : d.home);
   // Saved results of the chosen folder, from an earlier scan, and whether they are the ones shown.
   // A folder that is not a drive or the user folder (an earlier scan of it is saved) still gets its own choice.
   if (!roots.some(([v]) => stNorm(v) === stNorm(root))) roots.push([root, root]);
@@ -777,7 +780,7 @@ async function pcStorage() {
   const sel = stSelected(), selSize = sel.reduce((t, x) => t + x.size, 0);
   const bar = sel.length ? `<div class="stbar" role="region" aria-label="Selected"><b>${num(sel.length)} selected</b><span class="num">${bytes(selSize)}</span>
     <label class="perm"><input type="checkbox" class="check" id="stperm" ${S.stPerm ? 'checked' : ''}> Delete for good, without the Recycle Bin</label><span class="grow"></span>
-    <button class="btn" data-action="st-clear">Clear</button><button class="btn danger" data-action="st-delete">${ic('trash')}${S.stPerm ? 'Delete for good' : 'Move to Recycle Bin'}</button></div>` : '';
+    <button class="btn" data-action="st-clear">Clear</button><button class="btn danger" data-action="st-delete" ${S.stBusy ? 'disabled' : ''}>${ic('trash')}${S.stPerm ? 'Delete for good' : 'Move to Recycle Bin'}</button></div>` : '';
   if (!r) return driveTiles + scan + (scanning || offerSaved ? '' : `<div class="empty">Scan your user folder or a whole drive to see what takes the space, biggest or smallest first, and delete what you don't need.</div>`) + stCaches(d) + stDownloads(dl) + stWindows(d) + appsPanel + bar;
 
 
@@ -871,7 +874,7 @@ function stApps(ap) {
   const jobs = ap.jobs.filter(j => j.state !== 'running').map(j => {
     const left = j.leftovers.reduce((t, x) => t + x.size, 0);
     const name = `<b style="font-weight:600">${esc(j.name)}</b>`;
-    const text = j.state === 'done' ? `${name} was uninstalled. ${left ? `It left ${bytes(left)} of files behind.` : 'Nothing was left behind.'}`
+    const text = j.state === 'done' ? `${name} was uninstalled. ${left ? `It left ${bytes(left)} of files behind.` : (j.msg ? '' : 'Nothing was left behind.')}${j.msg ? ' ' + esc(j.msg) : ''}`
       : j.state === 'failed' ? `${name} could not be uninstalled. ${esc(j.msg)}`
       : `${name}: ${esc(j.msg)}`;
     return `<div class="apjob ${j.state === 'failed' ? 'crit' : ''}"><div class="grow">${text}${left ? `<pre class="notes" style="max-height:90px;margin-top:6px">${esc(j.leftovers.map(x => `${x.path}  (${bytes(x.size)})`).join(NL))}</pre>` : ''}</div>
@@ -898,14 +901,23 @@ function stApps(ap) {
 }
 
 async function stDelete(items, perm) {
+  // Returns the per-item results, or undefined if the call failed.
+  if (S.stBusy) { toast('A delete is already running. Wait for it to finish.', true); return; }
+  S.stBusy = true;
   toast(`Deleting ${items.length} item${items.length === 1 ? '' : 's'}…`);
-  const r = await act(invoke('storage_delete', { items: items.map(x => ({ path: x.path, dir: x.dir ?? null, parent: x.parent ?? null })), permanent: perm }));
+  let r;
+  try { r = await act(invoke('storage_delete', { items: items.map(x => ({ path: x.path, dir: x.dir ?? null, parent: x.parent ?? null })), permanent: perm })); } finally { S.stBusy = false; }
   if (!r) return;
   const ok = r.filter(x => x.ok), bad = r.filter(x => !x.ok);
+  if (perm && ok.length) S.stPerm = false;
   for (const x of r) if (x.ok || /no longer exists/.test(x.error || '')) S.stSel.delete(x.path);
+  const gone = ok.map(x => x.path);
+  for (const k of [...S.stSel.keys()]) if (gone.some(p => k === p || k.startsWith(p + '\\'))) S.stSel.delete(k);
   const freed = ok.reduce((t, x) => t + x.freed, 0);
   const why = bad.length ? ` ${bad.length} not deleted: ${bad[0].error}` : '';
-  toast(ok.length ? `${perm ? 'Deleted' : 'Moved to the Recycle Bin:'} ${ok.length} item${ok.length === 1 ? '' : 's'}, ${bytes(freed)}.${perm ? '' : ' Empty the Recycle Bin to get the space back.'}${why}` : `Nothing was deleted.${why}`, !ok.length);
+  // The caller decides what happens next from these results.
+  toast(ok.length ? `${perm ? 'Deleted' : 'Moved to the Recycle Bin:'} ${ok.length} item${ok.length === 1 ? '' : 's'}, ${bytes(freed)}.${perm ? '' : ' Empty the Recycle Bin to get the space back.'}${why}` : `Nothing was deleted.${why}`, !ok.length || bad.length > 0);
+  return r;
 }
 
 async function pcRecordings() {
@@ -946,7 +958,7 @@ async function pcRecordings() {
   ${selBlock}
   <section class="panel"><div class="panel-head"><h2>Saved recordings</h2></div>
     ${saved.length ? `<div class="wrap-x" style="margin-top:8px"><table class="tbl"><thead><tr><th>App</th><th>Started</th><th>Length</th><th class="r">Avg CPU</th><th class="r">Peak memory</th><th></th></tr></thead><tbody>
-      ${saved.map(s => `<tr class="click ${s.id === S.recSel ? 'sel' : ''}" data-recsel="${s.id}"><td><b style="font-weight:600">${esc(s.app)}</b></td><td>${when(s.started)}</td><td>${dur(s.ended - s.started)}</td><td class="r num">${pct(s.cpu_avg)}</td><td class="r num">${bytes(s.mem_peak)}</td><td class="r"><button class="btn small ghost danger" data-recdel="${s.id}">${ic('trash')}Delete</button></td></tr>`).join('')}
+      ${saved.map(s => `<tr tabindex="0" class="click ${s.id === S.recSel ? 'sel' : ''}" data-recsel="${s.id}"><td><b style="font-weight:600">${esc(s.app)}</b></td><td>${when(s.started)}</td><td>${dur(s.ended - s.started)}</td><td class="r num">${pct(s.cpu_avg)}</td><td class="r num">${bytes(s.mem_peak)}</td><td class="r"><button class="btn small ghost danger" data-recdel="${s.id}">${ic('trash')}Delete</button></td></tr>`).join('')}
     </tbody></table></div>` : '<div class="empty">No saved recordings yet.</div>'}</section>`;
 }
 const sessionStats = s => `<dl class="kv"><dt>Average CPU</dt><dd>${pct(s.cpu_avg)}</dd><dt>Peak CPU</dt><dd>${pct(s.cpu_peak)}</dd><dt>Average memory</dt><dd>${bytes(s.mem_avg)}</dd><dt>Peak memory</dt><dd>${bytes(s.mem_peak)}</dd><dt>Disk and file I/O</dt><dd>${bytes(s.io_total)} total</dd><dt>Processes</dt><dd>up to ${s.procs_peak}</dd><dt>Samples</dt><dd>${s.samples}</dd></dl>`;
@@ -1101,13 +1113,21 @@ async function pageSettings() {
   const imp = d.imported;
   const importLine = ['jperformance', 'jserver'].map(k => `${k === 'jperformance' ? 'JPerformance' : 'JServer'}: ${imp[k] ? IMPORT_TEXT[imp[k]] : 'Not checked yet'}`).join(' · ');
   const u = S.update;
+  // Settings > Developer: what the GitHub CLI reports. Asked once while the option is on, after the page is drawn.
+  if (!d.use_gh) S.gh = null;
+  else if (!S.gh) { S.gh = 'pending'; invoke('gh_status').then(g => { S.gh = g; if (S.page === 'settings') render(); }).catch(() => { S.gh = { installed: false }; if (S.page === 'settings') render(); }); }
+  const g = S.gh;
+  const ghLine = !d.use_gh ? '' : g === 'pending' ? 'Checking the GitHub CLI…'
+    : !g.installed ? 'The GitHub CLI was not found. Install it from cli.github.com and sign in with gh auth login. Until then, checks run without it.'
+    : !g.signed_in ? 'The GitHub CLI is installed but not signed in. Run gh auth login in a terminal. Until then, checks run without it.'
+    : `Signed in to the GitHub CLI${g.user ? ' as ' + esc(g.user) : ''}. Update checks use your account.`;
   const updText = u.state === 'checking' ? 'Checking GitHub for a new release.'
     : u.state === 'up_to_date' ? `You have the latest version.${S.checkedAt ? ` Checked ${ago(S.checkedAt)}.` : ''}`
     : u.state === 'available' ? `Version ${esc(u.version)} is ready to install.`
     : u.state === 'downloading' ? `Downloading the update${u.total ? `, ${Math.round(u.done / u.total * 100)}%` : ''}.`
     : u.state === 'restarting' ? 'Restarting to finish the update.'
     : u.state === 'failed' ? `The update check failed: ${esc(u.message)}`
-    : 'Checks GitHub for a new release when it opens and every 30 minutes.';
+    : 'Checks GitHub for a new release when it opens and every 2 hours. Press Refresh to check now.';
   return head('Settings', 'Everything here is saved on this PC.') + `
   <div class="body" style="max-width:920px">
     <section class="panel"><div class="panel-head"><h2>Servers over SSH</h2></div>
@@ -1126,7 +1146,7 @@ async function pageSettings() {
     </section>
     <section class="panel"><div class="panel-head"><h2>Recording</h2></div><div class="set-list" style="margin-top:4px">
       <div class="set-row"><div><div class="t">Start with Windows</div><div class="d">Keeps recording after a restart. A small helper keeps going when this window is closed.</div></div><label class="switch"><input type="checkbox" id="autostart" ${d.autostart ? 'checked' : ''} aria-label="Start with Windows"><span></span></label></div>
-      <div class="set-row"><div><div class="t">Keep history for</div><div class="d">Older samples are removed automatically, for this PC and for servers.</div></div><select class="select" id="retention">${[7, 30, 90, 180, 365].map(n => `<option value="${n}" ${d.retention === n ? 'selected' : ''}>${n} days</option>`).join('')}</select></div>
+      <div class="set-row"><div><div class="t">Keep history for</div><div class="d">Older samples are removed automatically, for this PC and for servers.</div></div><select class="select" id="retention" data-was="${d.retention}">${[7, 30, 90, 180, 365].map(n => `<option value="${n}" ${d.retention === n ? 'selected' : ''}>${n} days</option>`).join('')}</select></div>
       <div class="set-row"><div><div class="t">History from JPerformance and JServer</div><div class="d">Copied once on first start. The old apps and their data were not changed. ${importLine}.</div></div><span></span></div>
       <div class="set-row"><div><div class="t">Recorder</div><div class="d">${d.recorder ? 'Running in the background.' : 'Not running, so nothing is being recorded.'}</div></div>${d.recorder ? '<span></span>' : `<button class="btn" data-action="start-recorder">${ic('play')}Start</button>`}</div>
     </div></section>
@@ -1134,7 +1154,10 @@ async function pageSettings() {
       <div class="set-row"><div><div class="t">Theme</div></div>${seg('theme', [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']], S.theme)}</div>
     </div></section>
     <section class="panel"><div class="panel-head"><h2>Updates</h2></div><div class="set-list" style="margin-top:4px">
-      <div class="set-row"><div><div class="t">JPerformance Unified ${esc(d.version)}</div><div class="d">${updText} Downloads are checked against the SHA-256 GitHub publishes before they replace the app.</div></div><div class="toolbar">${u.state === 'available' ? `<button class="btn" data-dialog="update">What's new in ${esc(u.version)}</button><button class="btn primary" data-action="install">${ic('download')}Install and restart</button>` : `<button class="btn" data-action="check" ${u.state === 'checking' || u.state === 'downloading' ? 'disabled' : ''}>${ic('refresh')}${u.state === 'checking' ? 'Checking' : 'Check for updates'}</button>`}</div></div>
+      <div class="set-row"><div><div class="t">JPerformance Unified ${esc(d.version)}</div><div class="d">${updText} Downloads are checked against the SHA-256 GitHub publishes before they replace the app.</div></div><div class="toolbar">${u.state === 'available' ? `<button class="btn" data-dialog="update">What's new in ${esc(u.version)}</button><button class="btn primary" data-action="install">${ic('download')}Install and restart</button>` : ''}<button class="btn" data-action="update-refresh" ${u.state === 'checking' || u.state === 'downloading' || u.state === 'restarting' ? 'disabled' : ''}>${ic('refresh')}${u.state === 'checking' ? 'Checking' : u.state === 'downloading' ? 'Downloading' : 'Refresh'}</button></div></div>
+    </div></section>
+    <section class="panel"><div class="panel-head"><h2>Developer</h2><span class="hint">For people who use GitHub's command-line tools. Nothing here is needed to use the app.</span></div><div class="set-list" style="margin-top:4px">
+      <div class="set-row"><div><div class="t">Use GitHub CLI for update checks</div><div class="d">Update checks use the account you signed in to the GitHub CLI (gh) with. GitHub then allows 5,000 checks an hour instead of the 60 shared by everything on your internet connection. Your sign-in stays in gh and is only sent to GitHub. Off by default.</div>${ghLine ? `<div class="d" style="margin-top:4px">${ghLine}</div>` : ''}</div><label class="switch"><input type="checkbox" id="usegh" ${d.use_gh ? 'checked' : ''} aria-label="Use GitHub CLI for update checks"><span></span></label></div>
     </div></section>
     <section class="panel"><div class="panel-head"><h2>Data</h2></div><div class="panel-body"><dl class="kv"><dt>Stored in</dt><dd class="mono">${esc(d.data_dir)}</dd><dt>Size</dt><dd>${bytes(d.size)}</dd><dt>Leaves this PC</dt><dd>Never. Only the update check talks to GitHub.</dd></dl></div></section>
   </div>`;
@@ -1144,7 +1167,8 @@ async function pageSettings() {
 let pendingDialog = null;
 function dialog(kind, arg) {
   const d = document.getElementById('dialog');
-  pendingDialog = { kind, arg };
+  if (!pendingDialog) openerFocus = document.activeElement;
+  pendingDialog = { kind, arg, opener: pendingDialog ? pendingDialog.opener : selectorOf(document.activeElement) };
   const u = S.update;
   d.innerHTML = kind === 'stopapp' ? `<h3>Stop ${esc(arg.app)}?</h3><p>This ends ${arg.procs === 1 ? 'its process' : `all ${arg.procs} processes named ${esc(arg.app)}`}, using ${bytes(arg.mem)}.${arg.win ? ' Its windows are asked to close first so it can save.' : ' It has no window, so it is ended right away.'}${arg.procs > 1 ? ' To stop only one of them, use Clean up.' : ''}</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Stop${arg.procs > 1 ? ' all ' + arg.procs : ''}</button></div>`
     : kind === 'tree' ? `<h3>Stop ${esc(arg.label)}?</h3><p>${arg.procs ? `This ends ${arg.procs} process${arg.procs === 1 ? '' : 'es'} using ${bytes(arg.mem)}: the program and everything it started.` : 'Each one is ended with everything it started.'} Windows are asked to close first so they can save. Other programs with the same name are not touched.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Stop</button></div>`
@@ -1160,13 +1184,39 @@ function dialog(kind, arg) {
     : kind === 'apun' ? `<h3>Uninstall ${esc(arg.name)}?</h3><p>${arg.total ? `It takes about ${bytes(arg.total)}. ` : ''}${arg.store ? 'Windows removes it from this PC.' : arg.quiet ? 'It is removed without more questions.' : 'Its own uninstaller opens. Follow its steps to finish.'}${arg.admin ? ' Windows asks for permission first.' : ''} Files it leaves behind are listed afterwards so you can remove them too.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Uninstall</button></div>`
     : kind === 'stbin' ? `<h3>Empty the Recycle Bin?</h3><p>${num(arg.items)} items (${bytes(arg.size)}) are deleted for good on every drive.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Empty Recycle Bin</button></div>`
     : kind === 'delete' ? `<h3>Delete this recording?</h3><p>Its samples are removed for good. Other history is kept.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Delete recording</button></div>`
+    : kind === 'apleft' ? `<h3>Move ${arg.items.length} leftover item${arg.items.length === 1 ? '' : 's'} (${bytes(arg.size)}) to the Recycle Bin?</h3><p>These were left behind by an uninstalled app. You can restore them from the Recycle Bin, and the space comes back when you empty it.</p><pre class="notes" style="max-height:140px">${esc(arg.items.slice(0, 8).map(x => x.path).join(String.fromCharCode(10)))}${arg.items.length > 8 ? esc(String.fromCharCode(10) + `and ${arg.items.length - 8} more`) : ''}</pre><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Move to Recycle Bin</button></div>`
+    : kind === 'keep' ? `<h3>Keep history for ${arg.days} days?</h3><p>Samples older than ${arg.days} days are removed for this PC and every server. This cannot be undone. The clean-up runs about once an hour while the recorder is running, so older samples can stay for up to an hour.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Remove older history</button></div>`
     : `<h3>What's new in ${esc(u.version)}</h3><pre class="notes">${esc(u.notes || 'No notes for this release.')}</pre><div class="row"><button class="btn" data-close>Later</button><button class="btn primary" data-confirm>Install and restart</button></div>`;
+  const title = d.querySelector('h3');
+  if (title) { title.id = 'dialog-title'; d.setAttribute('aria-labelledby', 'dialog-title'); }
   document.getElementById('scrim').classList.add('open');
-  d.querySelector('[data-confirm]')?.focus();
+  // Cancel has focus, so Enter does not run a destructive action by accident.
+  (d.querySelector('[data-close]') || d.querySelector('[data-confirm]'))?.focus();
 }
-const closeDialog = () => { document.getElementById('scrim').classList.remove('open'); pendingDialog = null; };
+const closeDialog = () => {
+  document.getElementById('scrim').classList.remove('open');
+  const was = pendingDialog;
+  pendingDialog = null;
+  const back = openerFocus;
+  openerFocus = null;
+  if (back && document.body.contains(back)) back.focus?.();
+  else if (was?.opener) document.querySelector(was.opener)?.focus?.();
+  // The picker keeps the value the user chose until it is put back here (the page is not redrawn).
+  if (was?.kind === 'keep') { const sel = document.getElementById('retention'); if (sel) sel.value = sel.dataset.was; }
+};
 async function confirmDialog() {
-  const p = pendingDialog; closeDialog(); if (!p) return;
+  const p = pendingDialog; pendingDialog = null; closeDialog(); if (!p) return;
+  // The redraw after the action puts focus back on the button that opened the dialog.
+  pendingFocus = p.opener;
+  if (p.kind === 'apleft') {
+    const r = await stDelete(p.arg.items, false);
+    // Only the leftovers that were moved leave the list. The job ends when none are left, so a failure stays visible.
+    // Only the leftovers that are gone leave the list. The job ends when none are left.
+    const gone = (r || []).filter(x => x.ok || /no longer exists/.test(x.error || '')).map(x => x.path);
+    if (gone.length) await act(invoke('apps_forget_leftovers', { id: p.arg.id, paths: gone }));
+    return render();
+  }
+  if (p.kind === 'keep') { await act(invoke('set_retention', { days: p.arg.days }), `History is kept for ${p.arg.days} days`); return render(); }
   if (p.kind === 'force') await stopApp(p.arg, true);
   if (p.kind === 'stopapp') await stopApp(p.arg.app, false);
   if (p.kind === 'tree') await stopTree(p.arg.targets, p.arg.reason);
@@ -1195,7 +1245,7 @@ const STOP_TEXT = {
 async function stopApp(app, force) {
   const r = await act(invoke('stop_app', { appName: app, force }));
   if (!r) return;
-  if (r.result === 'asked') { S.asked.add(app); toast(`Asked ${app} to close. If it does not close, use Force stop.`); setTimeout(() => render(), 3000); }
+  if (r.result === 'asked') { S.asked.set(app, Date.now()); toast(`Asked ${app} to close. If it does not close, use Force stop.`); setTimeout(() => render(), 3000); }
   else { S.asked.delete(app); toast(STOP_TEXT[r.result](app), r.result === 'denied'); }
 }
 async function stopTree(targets, reason) {
@@ -1266,6 +1316,7 @@ async function renderPage(gen, scrollTop) {
   renderSide();
   html = pressureBanner() + html;
   const changed = setHTML(main, html);
+  if (pendingFocus) { const el = document.querySelector(pendingFocus); if (el) el.focus(); else main.querySelector('button, input, select, [tabindex]')?.focus?.({ preventScroll: true }); pendingFocus = null; }
   if (scrollTop) main.scrollTop = 0;
   if (changed) requestAnimationFrame(drawCharts);
   if (!render.shown) { render.shown = true; invoke('ready').then(r => { if (r?.smoke && !r.hold) smokeRun(); }).catch(() => {}); }
@@ -1328,8 +1379,8 @@ document.addEventListener('click', async e => {
   if (ds.apdis) { await act(invoke('apps_dismiss', { id: ds.apdis })); return render(); }
   if (ds.apleft) {
     const j = S.apLast?.jobs.find(x => x.id === ds.apleft); if (!j) return;
-    await stDelete(j.leftovers.map(x => ({ path: x.path, size: x.size })), false);
-    await act(invoke('apps_dismiss', { id: j.id })); return render();
+    const items = j.leftovers.map(x => ({ path: x.path, size: x.size }));
+    return dialog('apleft', { id: j.id, items, size: items.reduce((t, x) => t + x.size, 0) });
   }
   if (ds.streveal !== undefined) return act(invoke('storage_reveal', { path: ds.streveal }));
   if (ds.recstop) { await act(invoke('stop_recording', { id: Number(ds.recstop) }), 'Recording saved'); return render(); }
@@ -1365,7 +1416,7 @@ document.addEventListener('click', async e => {
       return render();
     }
     case 'st-cancel': await act(invoke('storage_cancel')); return setTimeout(render, 300);
-    case 'st-clear': S.stSel.clear(); return render();
+    case 'st-clear': S.stSel.clear(); S.stPerm = false; return render();
     case 'st-more': S.stDupN += 100; return render();
     case 'st-fmore': S.stFN += 500; return render();
     case 'st-bmore': S.stBN += 300; return render();
@@ -1409,14 +1460,20 @@ document.addEventListener('click', async e => {
       return render();
     }
     case 'check': S.update = await act(invoke('check_update')) || S.update; pollUpdate(); return render();
+    case 'update-refresh': S.update = await act(invoke('refresh_update')) || S.update; pollUpdate(); return render();
     case 'install': return installUpdate();
   }
 });
 document.addEventListener('change', async e => {
   const t = e.target;
   if (t.id === 'ssh-toggle') { await act(invoke('set_ssh', { on: t.checked }), t.checked ? 'Servers over SSH are on' : 'Servers over SSH are off'); S.keys = null; return render(); }
+  if (t.id === 'usegh') { await act(invoke('set_use_gh', { on: t.checked }), t.checked ? 'Update checks will use the GitHub CLI' : 'Update checks no longer use the GitHub CLI'); S.gh = null; return render(); }
   if (t.id === 'autostart') { await act(invoke('set_autostart', { on: t.checked })); return render(); }
-  if (t.id === 'retention') { await act(invoke('set_retention', { days: Number(t.value) }), `History is kept for ${t.value} days`); t.blur(); return render(); }
+  if (t.id === 'retention') {
+    const days = Number(t.value);
+    if (days < Number(t.dataset.was)) return dialog('keep', { days });
+    await act(invoke('set_retention', { days }), `History is kept for ${days} days`); t.blur(); return render();
+  }
   if (t.dataset.host) { await act(invoke('server_watch', { alias: t.dataset.host, on: t.checked })); return render(); }
   if (t.id === 'ffilter') { S.filter = t.value; t.blur(); return render(); }
   if (t.id === 'histapp') { S.histApp = t.value; S.pinned = null; t.blur(); return render(); }
@@ -1436,7 +1493,7 @@ document.addEventListener('change', async e => {
   if (t.id === 'stdldays') { S.stDlDays = Number(t.value); S.stDlN = 50; t.blur(); return render(); }
   if (t.id === 'stbdays') { S.stBuildDays = Number(t.value); t.blur(); return render(); }
   if (t.dataset.csel) { t.checked ? S.cleanSel.add(t.dataset.csel) : S.cleanSel.delete(t.dataset.csel); quietRefresh.cleanAt = 0; return render(); }
-  if (t.id === 'autoclean') { await act(invoke('set_auto_cleanup', { on: t.checked, minutes: null }), t.checked ? 'Left-over helpers will be stopped automatically' : 'Automatic clean-up is off'); quietRefresh.cleanAt = 0; return render(); }
+  if (t.id === 'autoclean') { await act(invoke('set_auto_cleanup', { on: t.checked, minutes: null }), t.checked ? 'Idle shells left over from closed apps will be stopped automatically' : 'Automatic clean-up is off'); quietRefresh.cleanAt = 0; return render(); }
   if (t.id === 'automin') { await act(invoke('set_auto_cleanup', { on: !!document.getElementById('autoclean')?.checked, minutes: Number(t.value) })); t.blur(); quietRefresh.cleanAt = 0; return render(); }
 });
 let runT;
@@ -1447,7 +1504,22 @@ document.addEventListener('input', e => {
   clearTimeout(runT);
   runT = setTimeout(async () => { await render(); const el = document.getElementById(id); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }, 150);
 });
-addEventListener('keydown', e => { if (e.key === 'Escape' && pendingDialog) closeDialog(); });
+addEventListener('keydown', e => {
+  if (e.key === 'Escape' && pendingDialog) closeDialog();
+  if (e.key === 'Tab' && pendingDialog) {
+    const f = [...document.querySelectorAll('#dialog button:not([disabled]), #dialog input, #dialog select')];
+    const i = f.indexOf(document.activeElement);
+    if (f.length && e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); }
+    else if (f.length && !e.shiftKey && (i === f.length - 1 || i === -1)) { e.preventDefault(); f[0].focus(); }
+  }
+  // Rows that open something respond to Enter and Space like a button.
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches?.('tr[data-go],tr[data-gtoggle],tr[data-pcapp],tr[data-appsel],tr[data-recsel]')) {
+    e.preventDefault();
+    e.target.click();
+    pendingFocus = selectorOf(e.target);
+    setTimeout(() => { pendingFocus = null; }, 3000);
+  }
+});
 
 /* ================= Theme and updates ================= */
 const mq = matchMedia('(prefers-color-scheme: dark)');
@@ -1465,22 +1537,36 @@ mq.addEventListener('change', () => { applyTheme(S.theme); document.getElementBy
 let rt; addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(drawCharts, 80); });
 
 let updT;
+let openerFocus = null;
+let pendingFocus = null;
+// A selector for an element, from its id and data attributes, so it can be found again after a redraw.
+function selectorOf(el) {
+  if (!el || !el.tagName || el === document.body) return null;
+  const attrs = [...el.attributes].filter(a => a.name === 'id' || a.name.startsWith('data-')).map(a => `[${a.name}="${CSS.escape(a.value)}"]`).join('');
+  return attrs ? el.tagName.toLowerCase() + attrs : null;
+}
 async function pollUpdate() {
   clearTimeout(updT);
+  const before = JSON.stringify(S.update);
   try { S.update = await invoke('update_state'); } catch { /* keep the last state */ }
   if (['up_to_date', 'available'].includes(S.update.state)) S.checkedAt = Date.now() / 1000;
   renderSide();
   if (['checking', 'downloading', 'restarting'].includes(S.update.state)) updT = setTimeout(pollUpdate, 800);
-  else if (S.page === 'settings') render();
+  // Redraw Settings only when the update state changed, so a 15-second check does not reset an open menu.
+  else if (S.page === 'settings' && JSON.stringify(S.update) !== before && !['SELECT', 'INPUT'].includes(document.activeElement?.tagName)) render();
 }
 async function checkUpdates() { try { S.update = await invoke('check_update'); } catch { } pollUpdate(); }
+
+// Asks GitHub when the app opens and every 2 hours. GitHub allows 60 unsigned requests an hour per connection,
+// and a "nothing new" reply counts too, so checks stay rare. Refresh in Settings checks right away.
+const UPDATE_EVERY_MS = 2 * 60 * 60 * 1000;
 
 (async function start() {
   try { const st = await invoke('settings'); S.theme = st.theme; } catch { }
   applyTheme(S.theme);
   await render();
   checkUpdates();
-  setInterval(checkUpdates, 30 * 60 * 1000);
+  setInterval(checkUpdates, UPDATE_EVERY_MS);
 })();
 
 /* ================= Smoke run (--smoke) ================= */

@@ -709,6 +709,12 @@ async fn apps_dismiss(id: String) -> Res {
     Ok(json!(true))
 }
 
+#[tauri::command]
+async fn apps_forget_leftovers(id: String, paths: Vec<String>) -> Res {
+    apps::forget_leftovers(&id, &paths);
+    Ok(json!(true))
+}
+
 /// Windows' own Storage settings, which can clean Windows Update files and other system files.
 #[tauri::command]
 async fn storage_windows_settings() -> Res {
@@ -892,6 +898,7 @@ async fn settings(app: tauri::State<'_, App>, rescan: Option<bool>) -> Res {
         "size": size,
         "imported": { "jperformance": paths::import_result("JPerformance"), "jserver": paths::import_result("JServer") },
         "version": update::CURRENT,
+        "use_gh": update::use_gh(),
         "recorder": collector::is_running(),
     }))
 }
@@ -922,6 +929,26 @@ async fn set_retention(app: tauri::State<'_, App>, days: i64) -> Res {
     Ok(Value::Null)
 }
 
+/// Settings > Developer: send update checks through the GitHub CLI.
+#[tauri::command]
+async fn set_use_gh(app: tauri::State<'_, App>, on: bool) -> Res {
+    ldb::set_setting(&*app.local.get()?, ldb::KEY_USE_GH, if on { "1" } else { "0" }).map_err(e)?;
+    Ok(Value::Null)
+}
+
+/// Whether the GitHub CLI is installed and signed in. Asked only when the developer option is on.
+#[tauri::command]
+async fn gh_status() -> Res {
+    tauri::async_runtime::spawn_blocking(update::gh_status).await.map_err(e)
+}
+
+/// The Refresh button: checks now and installs a newer release straight away.
+#[tauri::command]
+async fn refresh_update(app: tauri::State<'_, App>) -> Res {
+    app.updater.refresh();
+    Ok(update_json(app.updater.view()))
+}
+
 #[tauri::command]
 async fn set_theme(app: tauri::State<'_, App>, theme: String) -> Res {
     let theme = if matches!(theme.as_str(), "light" | "dark") { theme } else { "system".into() };
@@ -949,19 +976,19 @@ fn update_json(s: update::State) -> Value {
 
 #[tauri::command]
 async fn update_state(app: tauri::State<'_, App>) -> Res {
-    Ok(update_json(app.updater.state()))
+    Ok(update_json(app.updater.view()))
 }
 
 #[tauri::command]
 async fn check_update(app: tauri::State<'_, App>) -> Res {
     app.updater.check();
-    Ok(update_json(app.updater.state()))
+    Ok(update_json(app.updater.view()))
 }
 
 #[tauri::command]
 async fn install_update(app: tauri::State<'_, App>) -> Res {
     app.updater.install();
-    Ok(update_json(app.updater.state()))
+    Ok(update_json(app.updater.view()))
 }
 
 /// The page has drawn its first view; show the window (it starts hidden to avoid a blank flash).
@@ -1083,6 +1110,7 @@ pub fn run(smoke: bool) -> Result<(), String> {
             apps_rescan,
             apps_uninstall,
             apps_dismiss,
+            apps_forget_leftovers,
             recordings,
             recording_series,
             start_recording,
@@ -1100,6 +1128,9 @@ pub fn run(smoke: bool) -> Result<(), String> {
             set_autostart,
             set_retention,
             set_theme,
+            refresh_update,
+            set_use_gh,
+            gh_status,
             start_recorder,
             update_state,
             check_update,

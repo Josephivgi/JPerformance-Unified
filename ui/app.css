@@ -90,10 +90,11 @@ body { background: var(--plane); overflow: hidden; }
 .brand { display: flex; align-items: center; gap: 10px; padding: 16px 16px 12px; }
 .logo {
   width: 30px; height: 30px; border-radius: 8px; flex: none;
-  background: var(--ink); color: var(--surface);
+  /* same colors as the app icon (icons/make_icon.py) in both themes */
+  background: #101317; color: #e53935;
   display: grid; place-items: center;
 }
-.logo svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.logo span { font-family: "Segoe UI Black", "Segoe UI", sans-serif; font-weight: 900; font-size: 10.5px; letter-spacing: -0.02em; line-height: 1; }
 .brand-name { font-weight: 650; font-size: 14.5px; letter-spacing: -0.01em; }
 .brand-sub { font-size: 11.5px; color: var(--muted); }
 .side-scroll { flex: 1; overflow: auto; padding: 4px 8px 12px; display: flex; flex-direction: column; gap: 2px; }
@@ -373,7 +374,7 @@ body { background: var(--plane); overflow: hidden; }
 /* Dialog */
 .scrim { position: fixed; inset: 0; background: rgba(10,12,15,.45); display: none; place-items: center; z-index: 20; }
 .scrim.open { display: grid; }
-.dialog { width: min(440px, calc(100vw - 32px)); background: var(--surface); border-radius: 12px; border: 1px solid var(--line); padding: 20px; box-shadow: 0 20px 50px rgba(0,0,0,.3); }
+.dialog { width: min(440px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; background: var(--surface); border-radius: 12px; border: 1px solid var(--line); padding: 20px; box-shadow: 0 20px 50px rgba(0,0,0,.3); }
 .dialog h3 { margin: 0 0 6px; font-size: 16px; }
 .dialog p { margin: 0 0 16px; color: var(--ink-2); }
 .dialog .row { display: flex; justify-content: flex-end; gap: 8px; }
@@ -393,8 +394,12 @@ body { background: var(--plane); overflow: hidden; }
   .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .side { border-right: 0; border-bottom: 1px solid var(--line); }
   .side-scroll { flex-direction: row; overflow-x: auto; padding: 0 8px 8px; }
-  .side-label, .machine-nav .minis, .machine-nav .why, .side-foot { display: none; }
+  .side-label, .machine-nav .minis, .machine-nav .why { display: none; }
+  /* Keep Settings and the update banner reachable; the recorder line is only on wide screens. */
+  .side-foot .rec { display: none; }
+  .side-foot { border-top: 0; padding: 0 8px 8px; }
   .nav { width: auto; white-space: nowrap; }
+  .head, .body { padding-left: 16px; padding-right: 16px; }
   .tiles { grid-template-columns: minmax(0, 1fr); }
   .add-servers { grid-template-columns: 1fr; }
 }
@@ -408,6 +413,7 @@ body { background: var(--plane); overflow: hidden; }
 }
 .toast.crit { background: var(--critical-ink); color: #fff; }
 .toast[hidden] { display: none; }
+@media (max-width: 720px) { .toast { left: 16px; right: 16px; max-width: none; } }
 .rec .why { display: flex; gap: 5px; align-items: center; color: var(--critical-ink); font-weight: 600; }
 .loading { padding: 40px 28px; color: var(--muted); }
 .notes { white-space: pre-wrap; max-height: 320px; overflow: auto; color: var(--ink-2); margin: 0 0 16px; font-size: 12.5px; }
@@ -419,6 +425,7 @@ body { background: var(--plane); overflow: hidden; }
 .input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .pressure { display: flex; gap: 12px; align-items: flex-start; margin: 16px 28px 0; padding: 12px 16px; border-radius: var(--radius); background: var(--warning-wash); border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent); }
 .pressure .fi { color: var(--warning-ink); width: 18px; height: 18px; margin-top: 2px; flex: none; }
+@media (max-width: 720px) { .pressure { margin: 16px 16px 0; } }
 .pressure .grow { flex: 1; min-width: 0; }
 .pr-apps { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; font-size: 12.5px; color: var(--ink-2); }
 .pr-app { display: inline-flex; gap: 6px; align-items: center; }

@@ -259,6 +259,9 @@ fn main() {
             autostart::refresh_path();
             paths::import_legacy();
             let smoke = args.first().is_some_and(|a| a == "--smoke");
+            if smoke {
+                paths::set_smoke();
+            }
             if let Err(e) = collector::spawn_detached() {
                 log(&format!("could not start the recorder: {e}"));
             }

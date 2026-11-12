@@ -31,15 +31,18 @@ pub const AGENT_IDLE_SECS: i64 = 30 * 60;
 /// (a dev server started from a terminal that was closed), not a leftover.
 const LONG_RUNNING: &[&str] = &["serve", "server", "dev", "start", "daemon", "watch", "hub", "listen", "tunnel", "worker"];
 
-/// True when a left-over helper may be checked by default and stopped automatically:
-/// a small tree whose command does not look like a server.
-pub fn safe_to_auto_stop(detail: &str, procs: usize) -> bool {
-    let d = detail.to_ascii_lowercase();
-    procs <= 3 && !LONG_RUNNING.iter().any(|w| d.contains(w))
+/// True when a command line does not look like a server or watcher.
+fn looks_long_running(cmdline: &str) -> bool {
+    LONG_RUNNING.iter().any(|w| cmdline.contains(w))
 }
 
 fn base(name: &str) -> String {
     name.to_ascii_lowercase().trim_end_matches(".exe").to_string()
+}
+/// Shells left behind by a closed program. Only these are checked by default: a node or python
+/// process may be a bot or a server someone still uses, so the user ticks those by hand.
+pub fn is_shell(name: &str) -> bool {
+    matches!(base(name).as_str(), "cmd" | "pwsh" | "powershell" | "bash" | "sh")
 }
 pub fn is_helper(name: &str) -> bool {
     HELPERS.contains(&base(name).as_str())
@@ -60,6 +63,8 @@ pub struct Node {
     pub cpu: f64,
     pub mem: u64,
     pub detail: String,
+    /// The whole command line, lowercased. Only used to spot servers and watchers; never shown.
+    pub cmdline: String,
     pub session: Option<u32>,
     /// Seconds since it last used the CPU, as recorded by the background recorder (0 when unknown).
     pub idle: i64,
@@ -126,6 +131,7 @@ impl Tree {
                     cpu: p.cpu_usage() as f64 / cores,
                     mem: p.memory(),
                     detail: detail(p),
+                    cmdline: p.cmd().iter().map(|a| a.to_string_lossy().to_ascii_lowercase()).collect::<Vec<_>>().join(" "),
                     session: p.session_id().map(|s| s.as_u32()),
                     idle: activity.get(&(pid, started)).map(|&at| (now - at).max(0)).unwrap_or(0),
                 },
@@ -209,6 +215,13 @@ impl Tree {
             s.idle = 0;
         }
         s
+    }
+
+    /// True when the whole tree is small and nothing in it looks like a server or watcher.
+    /// Children are checked too: a shell that only wraps a dev server must not be pre-checked.
+    pub fn tree_safe(&self, pid: u32) -> bool {
+        let all = self.descendants(pid);
+        all.len() <= 3 && all.iter().all(|p| self.nodes.get(p).is_none_or(|n| !looks_long_running(&n.cmdline)))
     }
 
     fn label(&self, pid: u32) -> String {
@@ -300,7 +313,7 @@ impl Tree {
                     label: self.label(n.pid),
                     kind: "orphan",
                     why: "Left running after the program that started it closed".into(),
-                    checked: s.idle >= ORPHAN_IDLE_SECS && safe_to_auto_stop(&n.detail, s.procs),
+                    checked: s.idle >= ORPHAN_IDLE_SECS && is_shell(&n.name) && self.tree_safe(n.pid),
                     sum: s,
                 });
             } else if is_agent(&n.name) && !n.parent.is_some_and(|p| self.nodes.get(&p).is_some_and(|pn| is_agent(&pn.name))) {

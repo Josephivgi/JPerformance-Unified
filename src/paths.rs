@@ -15,6 +15,17 @@ pub fn data_dir() -> PathBuf {
     dir
 }
 
+static SMOKE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Marks this process as a hidden `--smoke` test run, so it keeps what it saves apart from the user's.
+pub fn set_smoke() {
+    SMOKE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn is_smoke() -> bool {
+    SMOKE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// History of this PC.
 pub fn local_db() -> PathBuf {
     data_dir().join("this-pc.db")

@@ -6,7 +6,7 @@
 
 use super::storage::{CLOUD, env_path, file_type, norm, protected_reason};
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::Metadata;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -563,11 +563,14 @@ struct State {
     list: Vec<Rule>,
     downloads: Option<Downloads>,
     system: Vec<Value>,
+    /// Counts the clean-up results written to the list, and when each rule was last cleaned.
+    epoch: u64,
+    touched: HashMap<String, u64>,
 }
 
 fn slot() -> &'static Mutex<State> {
     static S: OnceLock<Mutex<State>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(State { measuring: false, at: None, list: Vec::new(), downloads: None, system: Vec::new() }))
+    S.get_or_init(|| Mutex::new(State { measuring: false, at: None, list: Vec::new(), downloads: None, system: Vec::new(), epoch: 0, touched: HashMap::new() }))
 }
 
 /// Measures everything in the background, unless that was done in the last half hour and
@@ -598,8 +601,14 @@ pub fn refresh(force: bool) {
         }
         let procs = process_names();
         for mut r in list {
+            // A clean-up that finished on this rule while it was being measured has the newer numbers, so keep those.
+            let start = slot().lock().unwrap().epoch;
             measure(&mut r, &procs);
-            if let Some(k) = slot().lock().unwrap().list.iter_mut().find(|k| k.id == r.id) {
+            let mut c = slot().lock().unwrap();
+            if c.touched.get(&r.id).is_some_and(|&g| g > start) {
+                continue;
+            }
+            if let Some(k) = c.list.iter_mut().find(|k| k.id == r.id) {
                 *k = r;
             }
         }
@@ -804,7 +813,11 @@ fn run_job(job: &Job, picked: Vec<Rule>) {
         res["running"] = json!(r.running);
         job.results.lock().unwrap().push(res);
         // Keep the list in step with what is left.
-        for k in slot().lock().unwrap().list.iter_mut().filter(|k| k.id == r.id) {
+        let mut c = slot().lock().unwrap();
+        c.epoch += 1;
+        let at = c.epoch;
+        c.touched.insert(r.id.clone(), at);
+        for k in c.list.iter_mut().filter(|k| k.id == r.id) {
             (k.size, k.files, k.running) = (r.size, r.files, r.running);
             k.sizes = r.sizes.clone();
         }

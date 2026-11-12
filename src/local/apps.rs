@@ -441,6 +441,18 @@ pub fn dismiss(id: &str) {
     state().lock().unwrap().jobs.remove(id);
 }
 
+// Drops leftovers that were moved to the Recycle Bin, so a partial move does not list them again.
+// The job goes away once nothing is left in it.
+pub fn forget_leftovers(id: &str, paths: &[String]) {
+    let mut s = state().lock().unwrap();
+    if let Some(j) = s.jobs.get_mut(id) {
+        j.leftovers.retain(|(p, _)| !paths.iter().any(|x| x == p));
+        if j.leftovers.is_empty() {
+            s.jobs.remove(id);
+        }
+    }
+}
+
 // ---------- uninstalling ----------
 
 fn wide(s: &str) -> Vec<u16> {
@@ -451,7 +463,7 @@ fn wide(s: &str) -> Vec<u16> {
 /// Err("cancelled") when the user said no to the permission prompt.
 fn shell_run_wait(exe: &str, args: &str, admin: bool) -> Result<u32, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
-    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
     use windows_sys::Win32::UI::Shell::{SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     let verb = wide(if admin { "runas" } else { "open" });
@@ -473,7 +485,12 @@ fn shell_run_wait(exe: &str, args: &str, admin: bool) -> Result<u32, String> {
     }
     let mut code = 0u32;
     unsafe {
-        WaitForSingleObject(info.hProcess, INFINITE);
+        // Stop waiting after 15 minutes, so a stuck uninstaller cannot block every later uninstall.
+        let waited = WaitForSingleObject(info.hProcess, 900_000);
+        if waited == 0x0000_0102 {
+            CloseHandle(info.hProcess);
+            return Err("Its uninstaller has been running for 15 minutes, so it was left alone. Finish or close it, then check again.".into());
+        }
         GetExitCodeProcess(info.hProcess, &mut code);
         CloseHandle(info.hProcess);
     }
@@ -511,36 +528,46 @@ fn run_uninstall(e: Entry) {
                 set_job(&id, "cancelled", "The uninstall was cancelled.".into(), Vec::new());
                 return;
             }
-            Ok(_) => {
+            Ok(code) => {
                 // Many uninstallers hand off to a copy of themselves and return at once, so wait for the entry to go.
                 let t = Instant::now();
                 while registry_has(&e) && t.elapsed() < Duration::from_secs(90) {
                     std::thread::sleep(Duration::from_millis(1500));
                 }
-                if registry_has(&e) { Err("still".into()) } else { Ok(()) }
+                if !registry_has(&e) {
+                    Ok(())
+                } else if code != 0 && code != 3010 && code != 1641 {
+                    Err(format!("The uninstaller stopped with code {code}, and the app is still listed."))
+                } else {
+                    Err("still".into())
+                }
             }
         }
     };
     match result {
         Ok(()) => {
             let mut left = Vec::new();
+            let mut skipped = false;
             for p in e.location.iter().chain(e.data.iter()) {
                 if p.is_dir() && super::storage::protected_reason(p).is_none() {
                     let n = tree_size(p).0;
                     if n > 0 {
                         left.push((p.to_string_lossy().to_string(), n));
                     }
+                } else if p.is_dir() && tree_size(p).0 > 0 {
+                    skipped = true;
                 }
             }
+            let note = if skipped { "Some of its files are in Program Files or ProgramData. JPerformance leaves those in place, so remove them yourself if you need the space.".to_string() } else { String::new() };
             let mut s = state().lock().unwrap();
             s.sizes.remove(&id);
             if e.store.is_some() {
                 s.store.retain(|x| x.id != id);
             }
             drop(s);
-            set_job(&id, "done", String::new(), left);
+            set_job(&id, "done", note, left);
         }
-        Err(m) if m == "still" => set_job(&id, "still", "It is still installed. If its uninstaller is open, finish the steps there. It leaves this list once it is gone.".into(), Vec::new()),
+        Err(m) if m == "still" => set_job(&id, "still", "It is still installed. If its uninstaller is open, finish the steps there. Then press Dismiss.".into(), Vec::new()),
         Err(m) => set_job(&id, "failed", m, Vec::new()),
     }
 }

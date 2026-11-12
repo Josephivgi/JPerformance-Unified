@@ -266,7 +266,7 @@ pub fn commit_charge() -> (u64, u64) {
     (m.ullTotalPageFile.saturating_sub(m.ullAvailPageFile), m.ullTotalPageFile)
 }
 
-/// Ends helpers (node, python, shells) that were left running after the program that
+/// Ends idle shells that were left running after the program that
 /// started them closed, once they have been idle for `idle_for` seconds. Only the user's own session.
 fn auto_cleanup(conn: &rusqlite::Connection, sys: &System, cores: f64, activity: &HashMap<(u32, i64), (u64, i64)>, ts: i64, idle_for: i64, session: Option<u32>) {
     let act: HashMap<(u32, i64), i64> = activity.iter().map(|(k, v)| (*k, v.1)).collect();

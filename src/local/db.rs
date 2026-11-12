@@ -189,6 +189,9 @@ pub const KEY_AUTO_CLEANUP: &str = "auto_cleanup";
 pub const KEY_AUTO_CLEANUP_MIN: &str = "auto_cleanup_minutes";
 pub const DEFAULT_AUTO_CLEANUP_MIN: i64 = 15;
 
+/// Developer option: update checks go through the user's signed-in GitHub CLI. Off by default.
+pub const KEY_USE_GH: &str = "update_use_gh";
+
 pub const DEFAULT_INTERVAL: i64 = 5;
 pub const DEFAULT_RETENTION: i64 = 30;
 

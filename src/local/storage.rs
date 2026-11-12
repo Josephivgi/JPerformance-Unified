@@ -1023,32 +1023,49 @@ pub struct Deleted {
     pub error: Option<String>,
 }
 
+/// True when a file still has the size and modified time it had when the scan read it.
+fn matches_scan(path: &str, (size, modified): (u64, i64)) -> bool {
+    std::fs::metadata(path).map(|m| m.len() == size && unix(m.modified()) == modified).unwrap_or(false)
+}
+
 /// Deletes what the user picked: to the Recycle Bin, or for good when `permanent`.
 /// Refuses protected folders, links, and the last copy of a duplicate.
 pub fn delete(items: Vec<Item>, permanent: bool) -> Vec<Deleted> {
     let scan = current();
-    let mut guard = scan.as_ref().map(|s| s.done.lock().unwrap());
-    let mut done = guard.as_mut().and_then(|g| g.as_mut());
-
-    // Never every copy of a duplicate.
-    let picked: HashSet<String> = items.iter().map(|i| norm(Path::new(&i.path))).collect();
-    let mut keep_last: HashSet<String> = HashSet::new();
-    if let Some(d) = done.as_deref() {
-        let gone = removed_dirs(&d.dirs);
-        for g in &d.dups {
-            let paths: Vec<String> = g
-                .files
-                .iter()
-                .filter(|&&i| !d.files[i].removed && !gone[d.files[i].dir as usize])
-                .map(|&i| norm(&dir_path(&d.dirs, d.files[i].dir).join(&d.files[i].name)))
-                .collect();
-            if paths.len() > 1 && paths.iter().all(|p| picked.contains(p)) {
-                keep_last.insert(paths[0].clone());
+    // Work out what must be kept first. The lock is not held while files are removed,
+    // so the page can still read the scan during a long delete.
+    let (keep_last, dup_meta) = {
+        let guard = scan.as_ref().map(|s| s.done.lock().unwrap());
+        let done = guard.as_ref().and_then(|g| g.as_ref());
+        let mut keep_last: HashSet<String> = HashSet::new();
+        let mut dup_meta: HashMap<String, (u64, i64)> = HashMap::new();
+        if let Some(d) = done {
+            let picked: HashSet<String> = items.iter().map(|i| norm(Path::new(&i.path))).collect();
+            let gone = removed_dirs(&d.dirs);
+            for g in &d.dups {
+                let members: Vec<(String, (u64, i64))> = g
+                    .files
+                    .iter()
+                    .filter(|&&i| !d.files[i].removed && !gone[d.files[i].dir as usize])
+                    .map(|&i| (norm(&dir_path(&d.dirs, d.files[i].dir).join(&d.files[i].name)), (d.files[i].size, d.files[i].modified)))
+                    .collect();
+                // Never every copy of a duplicate.
+                if members.len() > 1 && members.iter().all(|(p, _)| picked.contains(p)) {
+                    // Keep a copy that still matches the scan, so the copy the user keeps is the one that is intact.
+                    // When no copy matches, every copy is kept.
+                    let intact: Vec<String> = members.iter().filter(|(p, m)| matches_scan(p, *m)).map(|(p, _)| p.clone()).collect();
+                    match intact.first() {
+                        Some(keep) => { keep_last.insert(keep.clone()); }
+                        None => keep_last.extend(members.iter().map(|(p, _)| p.clone())),
+                    }
+                }
+                dup_meta.extend(members);
             }
         }
-    }
+        (keep_last, dup_meta)
+    };
 
-    let mut out = Vec::new();
+    let mut results: Vec<(Item, PathBuf, Result<u64, String>)> = Vec::new();
     for item in items {
         let path = PathBuf::from(&item.path);
         let res = (|| -> Result<u64, String> {
@@ -1056,6 +1073,12 @@ pub fn delete(items: Vec<Item>, permanent: bool) -> Vec<Deleted> {
                 return Err("This is the last copy of a duplicate, so it was kept.".into());
             }
             let md = check_deletable(&path)?;
+            // A copy that changed since the scan is not the one the user looked at, so it is kept.
+            if let Some(&(size, modified)) = dup_meta.get(&norm(&path)) {
+                if md.len() != size || unix(md.modified()) != modified {
+                    return Err("It changed after the scan, so it was kept. Scan again to check it.".into());
+                }
+            }
             let size = if md.is_dir() { tree_size(&path).0 } else { md.len() };
             if permanent {
                 if md.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) }.map_err(|e| match e.kind() {
@@ -1067,9 +1090,15 @@ pub fn delete(items: Vec<Item>, permanent: bool) -> Vec<Deleted> {
             }
             Ok(size)
         })();
+        results.push((item, path, res));
+    }
+
+    let mut out = Vec::new();
+    let mut guard = scan.as_ref().map(|s| s.done.lock().unwrap());
+    for (item, path, res) in results {
         match res {
             Ok(freed) => {
-                if let Some(d) = done.as_deref_mut() {
+                if let Some(d) = guard.as_mut().and_then(|g| g.as_mut()) {
                     forget(d, &item, &path, freed);
                 }
                 out.push(Deleted { path: item.path, ok: true, freed, error: None });
@@ -1129,14 +1158,28 @@ fn now_secs() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
-fn saved_dir() -> PathBuf {
+fn user_saved_dir() -> PathBuf {
     crate::paths::data_dir().join("storage-scans")
 }
 
-fn saved_file(root: &Path) -> PathBuf {
+/// Where scans are saved. A hidden test run saves apart, so its scans never show up as the user's results.
+fn saved_dir() -> PathBuf {
+    if crate::paths::is_smoke() { crate::paths::data_dir().join("smoke-storage-scans") } else { user_saved_dir() }
+}
+
+/// Where saved scans are read from: a test run also reads the user's, without writing there.
+fn read_dirs() -> Vec<PathBuf> {
+    if crate::paths::is_smoke() { vec![saved_dir(), user_saved_dir()] } else { vec![saved_dir()] }
+}
+
+fn scan_name(root: &Path) -> String {
     let h = Sha256::digest(norm(root).as_bytes());
     let name: String = h.iter().take(8).map(|b| format!("{b:02x}")).collect();
-    saved_dir().join(format!("{name}.bin"))
+    format!("{name}.bin")
+}
+
+fn saved_file(root: &Path) -> PathBuf {
+    saved_dir().join(scan_name(root))
 }
 
 struct W(std::io::BufWriter<std::fs::File>);
@@ -1352,14 +1395,19 @@ fn read_saved(path: &Path) -> std::io::Result<(SavedHead, Done)> {
 
 /// Every saved scan, newest first: what was scanned, when, and how much it found.
 pub fn saved_list() -> Vec<Value> {
-    let mut out: Vec<SavedHead> = std::fs::read_dir(saved_dir())
+    let mut out: Vec<SavedHead> = read_dirs()
         .into_iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
         .flatten()
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "bin"))
         .filter_map(|e| read_head(&mut R(std::io::BufReader::new(std::fs::File::open(e.path()).ok()?))).ok())
+        // Results of a folder that is gone are no use to open.
+        .filter(|h| Path::new(&h.root).is_dir())
         .collect();
     out.sort_by(|a, b| b.at.cmp(&a.at));
+    let mut seen = HashSet::new();
+    out.retain(|h| seen.insert(norm(Path::new(&h.root))));
     out.iter().map(|h| json!({ "root": h.root, "at": h.at, "total": h.total, "files": h.files })).collect()
 }
 
@@ -1368,7 +1416,10 @@ pub fn open_saved(root: &Path) -> Result<(), String> {
     if current().is_some_and(|s| matches!(*s.phase.lock().unwrap(), "walking" | "comparing") || s.dups_busy.load(Ordering::SeqCst)) {
         return Err("Wait for the scan to finish, or cancel it, first.".into());
     }
-    let (head, done) = read_saved(&saved_file(root)).map_err(|_| "There are no saved results for this folder. Scan it instead.".to_string())?;
+    let (head, done) = read_dirs()
+        .iter()
+        .find_map(|d| read_saved(&d.join(scan_name(root))).ok())
+        .ok_or_else(|| "There are no saved results for this folder. Scan it instead.".to_string())?;
     let scan = Arc::new(Scan {
         root: PathBuf::from(&head.root),
         started: Instant::now(),
