@@ -164,13 +164,27 @@ pub fn run(stop: &AtomicBool) -> Result<(), String> {
                         // Memory in use is read again so the page can show what the pass moved out of RAM.
                         sys.refresh_memory();
                         let now_used = sys.used_memory();
-                        for f in &freed {
-                            log(&format!("RAM cleaner freed {} MB from {} ({} processes)", f.bytes / 1_048_576, f.app, f.procs));
-                            let _ = db::log_cleanup(&conn, ts, &f.app, f.procs, f.bytes, db::RAM_CLEAN_REASON, true);
-                        }
                         let bytes: u64 = freed.iter().map(|f| f.bytes).sum();
                         let procs: usize = freed.iter().map(|f| f.procs).sum();
-                        let _ = db::log_ram_run(&conn, ts, before, total, now_used, level as i64, freed.len(), procs, bytes, true);
+                        for f in &freed {
+                            log(&format!("RAM cleaner freed {} MB from {} ({} processes)", f.bytes / 1_048_576, f.app, f.procs));
+                        }
+                        // The pass and the apps it emptied go in together, so the page never shows half a pass.
+                        match conn.transaction() {
+                            Ok(tx) => {
+                                let saved = db::log_ram_run(&tx, ts, before, total, now_used, level as i64, freed.len(), procs, bytes, true)
+                                    .and_then(|run| {
+                                        for f in &freed {
+                                            db::log_ram_item(&tx, run, ts, &f.app, f.procs, f.bytes, true)?;
+                                        }
+                                        Ok(())
+                                    });
+                                if let Err(e) = saved.and_then(|()| tx.commit()) {
+                                    log(&format!("could not save the RAM pass: {e}"));
+                                }
+                            }
+                            Err(e) => log(&format!("could not save the RAM pass: {e}")),
+                        }
                     }
                 }
             }

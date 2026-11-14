@@ -56,6 +56,37 @@ fn trim(pid: u32) -> Option<u64> {
     Some(before.unwrap_or(0).saturating_sub(after.unwrap_or(0)))
 }
 
+/// When each process last used the CPU, for a pass asked for outside the recorder (the page's button, the
+/// command line). The recorder's table can be empty or stale, so anything busy during a short sample here
+/// counts as active now, and a process the recorder has never seen counts as idle: it is doing nothing.
+pub fn activity_for_pass(
+    conn: &rusqlite::Connection,
+    sys: &mut System,
+    ts: i64,
+    idle_for: i64,
+) -> rusqlite::Result<HashMap<(u32, i64), (u64, i64)>> {
+    let mut out: HashMap<(u32, i64), (u64, i64)> =
+        super::db::activity(conn)?.into_iter().map(|(k, at)| (k, (0, at))).collect();
+    let before: HashMap<(u32, i64), u64> = sys
+        .processes()
+        .iter()
+        .map(|(pid, p)| ((pid.as_u32(), p.start_time() as i64), p.accumulated_cpu_time()))
+        .collect();
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, super::tree::refresh_kind());
+    for (pid, p) in sys.processes() {
+        let key = (pid.as_u32(), p.start_time() as i64);
+        let cpu = p.accumulated_cpu_time();
+        let busy = cpu.saturating_sub(before.get(&key).copied().unwrap_or(cpu)) >= 60;
+        if busy {
+            out.insert(key, (cpu, ts));
+        } else if !out.contains_key(&key) {
+            out.insert(key, (cpu, ts - idle_for - 1));
+        }
+    }
+    Ok(out)
+}
+
 /// One pass. `activity` maps (pid, start time) to (cpu ms, last active ts); `trimmed` remembers when each
 /// process was last trimmed so it is not trimmed again every minute.
 pub fn run(

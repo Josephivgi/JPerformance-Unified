@@ -129,30 +129,43 @@ fn stamp(fmt: &str) -> impl Fn(i64) -> String + '_ {
     }
 }
 
-/// `--leaks` looks for apps whose memory keeps climbing and prints them. Read-only.
+/// `--leaks` looks for leaks now and prints them, the way the page does. It also updates what the page
+/// shows: a leak that has just stopped growing is marked as such, so this is not read-only.
 fn leaks_cli() -> Result<(), String> {
     attach_console();
     let conn = local::db::open(&paths::local_db()).map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
-    let found = local::leaks::detect(&conn, now).map_err(|e| e.to_string())?;
+    local::leaks::detect(&conn, now).map_err(|e| e.to_string())?;
     let mb = |b: i64| b as f64 / 1_048_576.0;
-    println!("\nMemory leaks still growing: {}", found.len());
-    for l in local::db::leaks(&conn).map_err(|e| e.to_string())? {
+    let since = now - local::db::RAM_RUN_HISTORY_DAYS * 86_400;
+    let leaks = local::db::leaks(&conn, since).map_err(|e| e.to_string())?;
+    let (growing, stopped): (Vec<_>, Vec<_>) = leaks.iter().partition(|l| !l.resolved);
+    println!("\nMemory leaks still growing: {}", growing.len());
+    for l in &growing {
         println!(
-            "  {:<34} {:>7.0} -> {:>7.0} MB in {:.1} h (+{:.0} MB/h), {:.1}% CPU, {}{}",
+            "  {:<34} {:>7.0} -> {:>7.0} MB in {:.1} h (+{:.0} MB/h), {:.1}% CPU{}",
             l.name.chars().take(34).collect::<String>(),
             mb(l.from_mem), mb(l.peak_mem), l.hours, l.rate / 1_048_576.0, l.cpu,
-            if l.resolved { "no longer growing" } else { "still growing" },
             if l.freed > 0 { format!(", {} MB freed from it so far", l.freed / 1_048_576) } else { String::new() }
         );
     }
-    let (freed, passes, last) = local::db::ram_run_totals(&conn).map_err(|e| e.to_string())?;
+    if !stopped.is_empty() {
+        println!("\nNo longer growing ({}):", stopped.len());
+        for l in stopped.iter().take(10) {
+            println!("  {:<34} stopped {}", l.name.chars().take(34).collect::<String>(), stamp("%Y-%m-%d %H:%M")(l.gone_ts));
+        }
+    }
+    let (freed, passes, last) = local::db::ram_run_totals(&conn, since).map_err(|e| e.to_string())?;
     println!("\nRAM cleaner: {passes} passes, {} MB freed in total, last {}", freed / 1_048_576,
         last.map(stamp("%Y-%m-%d %H:%M")).unwrap_or_else(|| "never".into()));
     for r in local::db::ram_runs(&conn, 10).map_err(|e| e.to_string())? {
-        println!("  {} {:>7.0} -> {:>7.0} MB, {} apps, {} procs, freed {} MB",
-            stamp("%m-%d %H:%M")(r.ts),
-            mb(r.mem_used), mb(r.mem_after), r.apps, r.procs, r.freed / 1_048_576);
+        // Passes recorded before 1.2.0 have no memory reading of their own.
+        let mem = if r.mem_total > 0 {
+            format!("{:>7.0} -> {:>7.0} MB", mb(r.mem_used), mb(r.mem_after))
+        } else {
+            "       (no reading) ".to_string()
+        };
+        println!("  {} {mem}, {} apps, {} procs, freed {} MB", stamp("%m-%d %H:%M")(r.ts), r.apps, r.procs, r.freed / 1_048_576);
     }
     Ok(())
 }
@@ -162,17 +175,17 @@ fn leaks_cli() -> Result<(), String> {
 /// Nothing is closed, and the pass is listed on the RAM page with the ones the recorder does on its own.
 fn free_ram_cli(args: &[String]) -> Result<(), String> {
     attach_console();
-    let conn = local::db::open(&paths::local_db()).map_err(|e| e.to_string())?;
+    let mut conn = local::db::open(&paths::local_db()).map_err(|e| e.to_string())?;
     let minutes = match args.first() {
         Some(m) => m.parse::<i64>().map_err(|_| "usage: --free-ram [idle minutes]".to_string())?,
         None => local::db::setting_i64(&conn, local::db::KEY_AUTO_CLEANUP_MIN, local::db::DEFAULT_AUTO_CLEANUP_MIN),
     };
-    let activity: std::collections::HashMap<(u32, i64), (u64, i64)> =
-        local::db::activity(&conn).map_err(|e| e.to_string())?.into_iter().map(|(k, at)| (k, (0, at))).collect();
     let mut sys = local::tree::snapshot();
     sys.refresh_memory();
     let before = sys.used_memory();
     let ts = chrono::Utc::now().timestamp();
+    // The recorder's own table can be empty or stale, so idleness is measured here as well.
+    let activity = local::ramclean::activity_for_pass(&conn, &mut sys, ts, minutes.max(0) * 60).map_err(|e| e.to_string())?;
     let freed = local::ramclean::run(&sys, &activity, &mut Default::default(), ts, minutes.max(0) * 60, local::tree::my_session());
     let mb = |b: u64| b as f64 / 1_048_576.0;
     for f in &freed {
@@ -184,11 +197,20 @@ fn free_ram_cli(args: &[String]) -> Result<(), String> {
     if !freed.is_empty() {
         let bytes: u64 = freed.iter().map(|f| f.bytes).sum();
         let procs: usize = freed.iter().map(|f| f.procs).sum();
-        for f in &freed {
-            let _ = local::db::log_cleanup(&conn, ts, &f.app, f.procs, f.bytes, local::db::RAM_CLEAN_REASON, false);
-        }
         let level = local::db::setting_i64(&conn, local::db::KEY_RAM_CLEAN_PCT, local::db::DEFAULT_RAM_CLEAN_PCT);
-        let _ = local::db::log_ram_run(&conn, ts, before, sys.total_memory(), after.used_memory(), level, freed.len(), procs, bytes, false);
+        // The pass and the apps it emptied go in together, so the page never shows half a pass.
+        if let Ok(tx) = conn.transaction() {
+            let saved = local::db::log_ram_run(&tx, ts, before, sys.total_memory(), after.used_memory(), level, freed.len(), procs, bytes, false)
+                .and_then(|run| {
+                    for f in &freed {
+                        local::db::log_ram_item(&tx, run, ts, &f.app, f.procs, f.bytes, false)?;
+                    }
+                    Ok(())
+                });
+            if let Err(e) = saved.and_then(|()| tx.commit()) {
+                eprintln!("could not save the pass: {e}");
+            }
+        }
     }
     println!("idle at least {minutes} min: {} apps, {:.1} MB moved out of RAM; memory in use {:.0} MB -> {:.0} MB",
         freed.len(), mb(freed.iter().map(|f| f.bytes).sum()), mb(before), mb(after.used_memory()));

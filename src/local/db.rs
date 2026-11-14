@@ -78,8 +78,10 @@ CREATE TABLE IF NOT EXISTS cleanup_log (
     procs  INTEGER NOT NULL,
     mem    INTEGER NOT NULL,
     reason TEXT    NOT NULL,
-    auto   INTEGER NOT NULL
+    auto   INTEGER NOT NULL,
+    run_id INTEGER
 );
+CREATE INDEX IF NOT EXISTS cleanup_log_reason ON cleanup_log(reason, name, ts);
 CREATE TABLE IF NOT EXISTS ram_runs (
     id        INTEGER PRIMARY KEY,
     ts        INTEGER NOT NULL,
@@ -173,6 +175,20 @@ fn migrate(conn: &Connection) -> Result<()> {
     if !has_planned {
         conn.execute_batch("ALTER TABLE sessions ADD COLUMN planned_end INTEGER")?;
     }
+    let has_run_id = conn
+        .prepare("SELECT 1 FROM pragma_table_info('cleanup_log') WHERE name = 'run_id'")?
+        .exists([])?;
+    if !has_run_id {
+        conn.execute_batch("ALTER TABLE cleanup_log ADD COLUMN run_id INTEGER")?;
+    }
+    // Before 1.2.0 the RAM cleaner wrote its passes only to cleanup_log. Turn each of those passes into
+    // a ram_runs row, without a memory reading (0), so the page's totals and its per-app list agree.
+    conn.execute_batch(
+        "INSERT INTO ram_runs(ts, mem_used, mem_total, mem_after, level, apps, procs, freed, auto)
+         SELECT ts, 0, 0, 0, 0, COUNT(*), SUM(procs), SUM(mem), MAX(auto)
+         FROM cleanup_log WHERE reason = 'Freed memory while idle'
+         GROUP BY ts HAVING ts NOT IN (SELECT ts FROM ram_runs);",
+    )?;
     for col in ["proc_count", "app_count", "commit_used", "commit_total"] {
         if !cols.iter().any(|c| c == col) {
             conn.execute_batch(&format!(
@@ -368,7 +384,9 @@ pub fn prune(conn: &Connection, older_than: i64) -> Result<usize> {
     let b = conn.execute("DELETE FROM app_minutes WHERE minute < ?1", [older_than])?;
     let c = conn.execute("DELETE FROM cleanup_log WHERE ts < ?1", [older_than])?;
     let d = conn.execute("DELETE FROM ram_runs WHERE ts < ?1", [older_than])?;
-    Ok(a + b + c + d)
+    // A leak that is still growing is kept however old it is; one that stopped is history.
+    let e = conn.execute("DELETE FROM leak_finds WHERE resolved = 1 AND gone_ts < ?1", [older_than])?;
+    Ok(a + b + c + d + e)
 }
 
 // ---------- process activity and clean-up ----------
@@ -428,7 +446,6 @@ pub struct RamRun {
     pub mem_used: i64,
     pub mem_total: i64,
     pub mem_after: i64,
-    pub level: i64,
     pub apps: i64,
     pub procs: i64,
     pub freed: i64,
@@ -457,43 +474,60 @@ pub fn log_ram_run(conn: &Connection, ts: i64, mem_used: u64, mem_total: u64, me
 /// The last `limit` RAM cleaner passes, newest first, with the apps each one trimmed.
 pub fn ram_runs(conn: &Connection, limit: usize) -> Result<Vec<RamRun>> {
     let mut stmt = conn.prepare(
-        "SELECT ts, mem_used, mem_total, mem_after, level, apps, procs, freed, auto FROM ram_runs ORDER BY ts DESC LIMIT ?1",
+        "SELECT id, ts, mem_used, mem_total, mem_after, apps, procs, freed, auto FROM ram_runs ORDER BY ts DESC LIMIT ?1",
     )?;
-    let mut runs: Vec<RamRun> = stmt
+    let mut runs: Vec<(i64, RamRun)> = stmt
         .query_map([limit as i64], |r| {
-            Ok(RamRun {
-                ts: r.get(0)?,
-                mem_used: r.get(1)?,
-                mem_total: r.get(2)?,
-                mem_after: r.get(3)?,
-                level: r.get(4)?,
-                apps: r.get(5)?,
-                procs: r.get(6)?,
-                freed: r.get(7)?,
-                auto: r.get::<_, i64>(8)? != 0,
-                items: Vec::new(),
-            })
+            Ok((
+                r.get::<_, i64>(0)?,
+                RamRun {
+                    ts: r.get(1)?,
+                    mem_used: r.get(2)?,
+                    mem_total: r.get(3)?,
+                    mem_after: r.get(4)?,
+                    apps: r.get(5)?,
+                    procs: r.get(6)?,
+                    freed: r.get(7)?,
+                    auto: r.get::<_, i64>(8)? != 0,
+                    items: Vec::new(),
+                },
+            ))
         })?
         .collect::<Result<_>>()?;
-    // The clean-up log rows of a pass carry the same timestamp, so they group back together exactly.
+    // Each pass writes its own rows with the id of the pass, so two passes in the same second stay apart.
     let mut items: std::collections::HashMap<i64, Vec<RamRunItem>> = std::collections::HashMap::new();
-    let mut stmt = conn.prepare("SELECT ts, name, procs, mem FROM cleanup_log WHERE reason = ?1 ORDER BY ts DESC, id DESC LIMIT ?2")?;
-    let rows = stmt.query_map(params![RAM_CLEAN_REASON, (limit * 20) as i64], |r| {
+    let mut stmt = conn.prepare(
+        "SELECT l.run_id, l.name, l.procs, l.mem FROM cleanup_log l JOIN ram_runs r ON r.id = l.run_id
+         WHERE l.reason = ?1 AND r.ts >= (SELECT COALESCE(MIN(ts), 0) FROM (SELECT ts FROM ram_runs ORDER BY ts DESC LIMIT ?2))
+         ORDER BY l.mem DESC",
+    )?;
+    let rows = stmt.query_map(params![RAM_CLEAN_REASON, limit as i64], |r| {
         Ok((r.get::<_, i64>(0)?, RamRunItem { app: r.get(1)?, procs: r.get(2)?, mem: r.get(3)? }))
     })?;
     for row in rows {
-        let (ts, item) = row?;
-        items.entry(ts).or_default().push(item);
+        let (id, item) = row?;
+        items.entry(id).or_default().push(item);
     }
-    for run in &mut runs {
-        run.items = items.remove(&run.ts).unwrap_or_default();
+    for (id, run) in &mut runs {
+        run.items = items.remove(id).unwrap_or_default();
     }
-    Ok(runs)
+    Ok(runs.into_iter().map(|(_, run)| run).collect())
 }
 
-/// All the memory the RAM cleaner has freed: (bytes, how many passes, when the last one was).
-pub fn ram_run_totals(conn: &Connection) -> Result<(i64, i64, Option<i64>)> {
-    conn.query_row("SELECT COALESCE(SUM(freed), 0), COUNT(*), MAX(ts) FROM ram_runs", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+/// All the memory the RAM cleaner has freed since `since`: (bytes, how many passes, when the last one was).
+pub fn ram_run_totals(conn: &Connection, since: i64) -> Result<(i64, i64, Option<i64>)> {
+    conn.query_row("SELECT COALESCE(SUM(freed), 0), COUNT(*), MAX(ts) FROM ram_runs WHERE ts >= ?1", [since], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    })
+}
+
+/// Notes one app's share of a pass, linked to the pass it belongs to.
+pub fn log_ram_item(conn: &Connection, run_id: i64, ts: i64, name: &str, procs: usize, mem: u64, auto: bool) -> Result<()> {
+    conn.execute(
+        "INSERT INTO cleanup_log(ts, name, procs, mem, reason, auto, run_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![ts, name, procs as i64, mem as i64, RAM_CLEAN_REASON, auto as i64, run_id],
+    )?;
+    Ok(())
 }
 
 /// What the RAM cleaner freed per app, biggest first: (app, bytes, times, when last).
@@ -571,26 +605,31 @@ pub fn unresolved_leaks(conn: &Connection) -> Result<Vec<String>> {
     rows.collect()
 }
 
-/// The leaks found, still growing first.
-pub fn leaks(conn: &Connection) -> Result<Vec<Leak>> {
+/// The leaks found, still growing first, with what the cleaner freed from each since `since`.
+pub fn leaks(conn: &Connection, since: i64) -> Result<Vec<Leak>> {
     let mut stmt = conn.prepare(
         "SELECT l.app, l.first_ts, l.last_ts, l.from_mem, l.peak_mem, l.rate, l.hours, l.cpu, l.series, l.resolved, l.gone_ts,
-                (SELECT MAX(ts) FROM cleanup_log WHERE reason = ?1 AND name = l.app), (SELECT COALESCE(SUM(mem), 0) FROM cleanup_log WHERE reason = ?1 AND name = l.app)
+                (SELECT MAX(ts) FROM cleanup_log WHERE reason = ?1 AND name = l.app AND ts >= ?2),
+                (SELECT COALESCE(SUM(mem), 0) FROM cleanup_log WHERE reason = ?1 AND name = l.app AND ts >= ?2)
          FROM leak_finds l ORDER BY l.resolved, l.rate DESC",
     )?;
-    let rows = stmt.query_map([RAM_CLEAN_REASON], |r| {
+    let rows = stmt.query_map(params![RAM_CLEAN_REASON, since], |r| {
         let series: Option<String> = r.get(8)?;
         // The page names each app from its description; this is the program file until it does.
         let app: String = r.get(0)?;
+        let (first_ts, last_ts): (i64, i64) = (r.get(1)?, r.get(2)?);
+        let (from_mem, peak_mem): (i64, i64) = (r.get(3)?, r.get(4)?);
+        // Worked out from the stored window, so a row written by several detections stays consistent.
+        let hours = ((last_ts - first_ts) as f64 / 3600.0).max(0.01);
         Ok(Leak {
             name: app.clone(),
             app,
-            first_ts: r.get(1)?,
-            last_ts: r.get(2)?,
-            from_mem: r.get(3)?,
-            peak_mem: r.get(4)?,
-            rate: r.get(5)?,
-            hours: r.get(6)?,
+            first_ts,
+            last_ts,
+            from_mem,
+            peak_mem,
+            rate: (peak_mem - from_mem) as f64 / hours,
+            hours,
             cpu: r.get(7)?,
             series: series.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
             resolved: r.get::<_, i64>(9)? != 0,
@@ -1057,4 +1096,160 @@ pub fn session_series(conn: &Connection, id: i64, bucket: i64) -> Result<Vec<App
         Ok(AppPoint { ts: r.get(0)?, cpu: r.get(1)?, mem: r.get(2)?, io_rate: r.get(3)?, procs: r.get(4)? })
     })?;
     rows.collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    const MB: i64 = 1_048_576;
+
+    /// A throwaway database, deleted when the test ends.
+    struct Temp(PathBuf, Connection);
+
+    impl Temp {
+        fn new(name: &str) -> Temp {
+            let path = std::env::temp_dir().join(format!("jpu-{}-{name}.db", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            Temp(path.clone(), open(&path).expect("open"))
+        }
+        /// Closes and reopens, which runs the migration and the backfill again.
+        fn reopen(&mut self) {
+            let fresh = open(&self.0).expect("reopen");
+            self.1 = fresh;
+        }
+    }
+
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn pass(db: &Temp, ts: i64, apps: &[(&str, usize, i64)]) {
+        let freed: u64 = apps.iter().map(|(_, _, m)| *m as u64).sum();
+        let procs: usize = apps.iter().map(|(_, p, _)| *p).sum();
+        let run = log_ram_run(&db.1, ts, 30_000 * MB as u64, 32_000 * MB as u64, 27_000 * MB as u64, 85, apps.len(), procs, freed, true).unwrap();
+        for (name, procs, mem) in apps {
+            log_ram_item(&db.1, run, ts, name, *procs, *mem as u64, true).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_pass_keeps_the_apps_it_trimmed() {
+        let db = Temp::new("pass-items");
+        pass(&db, 1_000, &[("chrome.exe", 8, 280 * MB), ("slack.exe", 3, 110 * MB)]);
+        let runs = ram_runs(&db.1, 10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].items.len(), 2);
+        assert_eq!(runs[0].items[0].app, "chrome.exe", "biggest first");
+        assert_eq!(runs[0].procs, 11);
+        assert_eq!(runs[0].freed, 390 * MB);
+        let (freed, passes, last) = ram_run_totals(&db.1, 0).unwrap();
+        assert_eq!((freed, passes, last), (390 * MB, 1, Some(1_000)));
+    }
+
+    #[test]
+    fn two_passes_in_the_same_second_stay_apart() {
+        let db = Temp::new("same-second");
+        pass(&db, 2_000, &[("chrome.exe", 2, 100 * MB)]);
+        pass(&db, 2_000, &[("node.exe", 1, 50 * MB)]);
+        let runs = ram_runs(&db.1, 10).unwrap();
+        assert_eq!(runs.len(), 2);
+        for run in &runs {
+            assert_eq!(run.items.len(), 1, "each pass keeps its own app");
+        }
+    }
+
+    #[test]
+    fn totals_only_count_the_window_asked_for() {
+        let db = Temp::new("totals-window");
+        pass(&db, 1_000, &[("chrome.exe", 1, 100 * MB)]);
+        pass(&db, 9_000, &[("chrome.exe", 1, 300 * MB)]);
+        assert_eq!(ram_run_totals(&db.1, 0).unwrap(), (400 * MB, 2, Some(9_000)));
+        assert_eq!(ram_run_totals(&db.1, 5_000).unwrap(), (300 * MB, 1, Some(9_000)));
+    }
+
+    #[test]
+    fn an_upgrade_fills_in_the_passes_it_never_recorded() {
+        // Before 1.2.0 the cleaner wrote only to cleanup_log. Those passes become ram_runs rows, so the
+        // page's totals agree with its per-app list instead of saying "Nothing freed yet" above GBs.
+        let mut db = Temp::new("upgrade-backfill");
+        for (ts, name, procs, mem) in [(1_000, "chrome.exe", 8, 1_600 * MB), (1_000, "node.exe", 4, 700 * MB), (1_000, "slack.exe", 2, 300 * MB)] {
+            log_cleanup(&db.1, ts, name, procs, mem as u64, RAM_CLEAN_REASON, true).unwrap();
+        }
+        db.reopen();
+        let runs = ram_runs(&db.1, 10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].apps, 3);
+        assert_eq!(runs[0].freed, 2_600 * MB);
+        assert_eq!(runs[0].mem_total, 0, "no memory reading for an old pass");
+        let by_app = ram_freed_by_app(&db.1, 0).unwrap();
+        let (freed, passes, _) = ram_run_totals(&db.1, 0).unwrap();
+        assert_eq!(freed, by_app.iter().map(|a| a.1).sum::<i64>(), "the two lists agree");
+        assert_eq!(passes, 1);
+        // Opening again must not add it twice.
+        db.reopen();
+        assert_eq!(ram_runs(&db.1, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_leak_that_stopped_growing_is_not_still_growing() {
+        let db = Temp::new("leak-resolve");
+        let row = LeakRow {
+            app: "sawtooth.exe".into(),
+            first_ts: 1_000,
+            last_ts: 5_000,
+            from_mem: 159 * MB,
+            peak_mem: 508 * MB,
+            rate: 87.0,
+            hours: 4.0,
+            cpu: 2.0,
+            series: "[]".into(),
+        };
+        upsert_leak(&db.1, &row).unwrap();
+        assert_eq!(leak_count(&db.1).unwrap(), 1);
+        resolve_leak(&db.1, "sawtooth.exe", 9_000).unwrap();
+        let found = super::leaks(&db.1, 0).unwrap();
+        assert!(found[0].resolved);
+        assert_eq!(found[0].gone_ts, 9_000);
+        assert_eq!(leak_count(&db.1).unwrap(), 0);
+        // It starts again: the row is live once more, and the window is the new climb's.
+        let again = LeakRow { first_ts: 20_000, last_ts: 26_000, from_mem: 200 * MB, peak_mem: 700 * MB, ..row };
+        upsert_leak(&db.1, &again).unwrap();
+        let found = super::leaks(&db.1, 0).unwrap();
+        assert!(!found[0].resolved);
+        assert_eq!((found[0].first_ts, found[0].peak_mem), (20_000, 700 * MB));
+        assert!((found[0].hours - 6_000.0 / 3600.0).abs() < 0.001, "hours come from the stored window");
+    }
+
+    #[test]
+    fn a_leak_row_keeps_the_first_time_it_was_seen_and_the_most_it_reached() {
+        let db = Temp::new("leak-merge");
+        let first = LeakRow {
+            app: "sawtooth.exe".into(),
+            first_ts: 1_000,
+            last_ts: 5_000,
+            from_mem: 159 * MB,
+            peak_mem: 508 * MB,
+            rate: 87.0,
+            hours: 4.0,
+            cpu: 2.0,
+            series: "[]".into(),
+        };
+        upsert_leak(&db.1, &first).unwrap();
+        // Seen again, a little further along and from a lower starting point.
+        let next = LeakRow { first_ts: 4_000, last_ts: 9_000, from_mem: 140 * MB, peak_mem: 620 * MB, ..first };
+        upsert_leak(&db.1, &next).unwrap();
+        let leak = &super::leaks(&db.1, 0).unwrap()[0];
+        assert_eq!(leak.first_ts, 1_000, "the first time it was seen");
+        assert_eq!(leak.peak_mem, 620 * MB, "the most it reached");
+        assert_eq!(leak.from_mem, 140 * MB, "the lowest it started from");
+        assert_eq!(leak.last_ts, 9_000);
+        // Rate and span always come from that stored window, never from two different climbs.
+        let hours = (9_000 - 1_000) as f64 / 3600.0;
+        assert!((leak.hours - hours).abs() < 0.001);
+        assert!((leak.rate - (620 - 140) as f64 * MB as f64 / hours).abs() < 1.0);
+    }
 }

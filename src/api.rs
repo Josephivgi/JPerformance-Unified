@@ -625,8 +625,8 @@ async fn ram_cleanup(app: tauri::State<'_, App>) -> Res {
     let idle_min = ldb::setting_i64(&l, ldb::KEY_AUTO_CLEANUP_MIN, ldb::DEFAULT_AUTO_CLEANUP_MIN);
     let latest = ldb::latest_sample(&l).map_err(e)?;
     let runs = ldb::ram_runs(&l, 40).map_err(e)?;
-    let (freed, passes, last) = ldb::ram_run_totals(&l).map_err(e)?;
     let since = now() - ldb::RAM_RUN_HISTORY_DAYS * 86_400;
+    let (freed, passes, last) = ldb::ram_run_totals(&l, since).map_err(e)?;
     let by_app: Vec<Value> = ldb::ram_freed_by_app(&l, since)
         .map_err(e)?
         .into_iter()
@@ -635,7 +635,7 @@ async fn ram_cleanup(app: tauri::State<'_, App>) -> Res {
             json!({ "app": app, "name": name, "freed": bytes, "times": times, "last": last })
         })
         .collect();
-    let leaks = ldb::leaks(&l)
+    let leaks = ldb::leaks(&l, since)
         .map_err(e)?
         .into_iter()
         .map(|mut k| {
@@ -655,7 +655,6 @@ async fn ram_cleanup(app: tauri::State<'_, App>) -> Res {
         "total": { "freed": freed, "passes": passes, "last": last },
         "by_app": by_app,
         "leaks": leaks,
-        "reason": ldb::RAM_CLEAN_REASON,
     }))
 }
 
@@ -672,10 +671,10 @@ async fn ram_free_now(app: tauri::State<'_, App>) -> Res {
         sys.refresh_memory();
         let before = sys.used_memory();
         let total = sys.total_memory().max(1);
-        let conn = ldb::open(&paths::local_db()).map_err(e)?;
+        let mut conn = ldb::open(&paths::local_db()).map_err(e)?;
         let level = ldb::setting_i64(&conn, ldb::KEY_RAM_CLEAN_PCT, ldb::DEFAULT_RAM_CLEAN_PCT);
-        let activity: HashMap<(u32, i64), (u64, i64)> =
-            ldb::activity(&conn).map_err(e)?.into_iter().map(|(k, at)| (k, (0, at))).collect();
+        // The recorder's own table can be empty or stale, so idleness is measured here as well.
+        let activity = crate::local::ramclean::activity_for_pass(&conn, &mut sys, ts, idle_min * 60).map_err(e)?;
         let freed = crate::local::ramclean::run(&sys, &activity, &mut HashMap::new(), ts, idle_min * 60, tree::my_session());
         let mut after_sys = sysinfo::System::new();
         after_sys.refresh_memory();
@@ -683,10 +682,12 @@ async fn ram_free_now(app: tauri::State<'_, App>) -> Res {
         let bytes: u64 = freed.iter().map(|f| f.bytes).sum();
         let procs: usize = freed.iter().map(|f| f.procs).sum();
         if bytes > 0 {
+            let tx = conn.transaction().map_err(e)?;
+            let run = ldb::log_ram_run(&tx, ts, before, total, after, level, freed.len(), procs, bytes, false).map_err(e)?;
             for f in &freed {
-                let _ = ldb::log_cleanup(&conn, ts, &f.app, f.procs, f.bytes, ldb::RAM_CLEAN_REASON, false);
+                ldb::log_ram_item(&tx, run, ts, &f.app, f.procs, f.bytes, false).map_err(e)?;
             }
-            let _ = ldb::log_ram_run(&conn, ts, before, total, after, level, freed.len(), procs, bytes, false);
+            tx.commit().map_err(e)?;
         }
         Ok::<Value, String>(json!({
             "freed": bytes,

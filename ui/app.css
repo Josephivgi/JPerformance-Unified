@@ -461,6 +461,10 @@ body { background: var(--plane); overflow: hidden; }
 .pressure .fi { color: var(--warning-ink); width: 18px; height: 18px; margin-top: 2px; flex: none; }
 @media (max-width: 720px) { .pressure { margin: 16px 16px 0; } }
 .pressure .grow { flex: 1; min-width: 0; }
+/* A line of context at the top of a page: what is not being measured, and why it matters. */
+.notice { display: flex; gap: 12px; align-items: flex-start; padding: 12px 16px; border-radius: var(--radius); background: var(--surface-2); border: 1px solid var(--line); font-size: 12.5px; color: var(--ink-2); }
+.notice .fi { width: 18px; height: 18px; margin-top: 1px; flex: none; color: var(--warning-ink); }
+.notice b { color: var(--ink); font-weight: 600; }
 .pr-apps { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; font-size: 12.5px; color: var(--ink-2); }
 .pr-app { display: inline-flex; gap: 6px; align-items: center; }
 .pr-app b { color: var(--ink); font-weight: 600; }
