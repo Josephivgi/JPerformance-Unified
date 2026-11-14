@@ -498,10 +498,12 @@ pub struct LiveRow {
     pub private: u64,
 }
 
+/// Running apps with their raw file description (not the view's last-window-title swap); the window titles
+/// open right now are in `titles`.
 pub fn live_apps(conn: &Connection) -> Result<Vec<LiveRow>> {
     let mut stmt = conn.prepare(
         "SELECT l.app, a.description, l.cpu, l.mem, l.io_rate, l.procs, a.exe_path, l.titles, l.private
-         FROM live_apps l LEFT JOIN app_names a ON a.app = l.app
+         FROM live_apps l LEFT JOIN apps a ON a.app = l.app
          ORDER BY l.cpu DESC, l.mem DESC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -535,13 +537,25 @@ pub struct AppSummary {
     pub minutes: i64,
     /// average number of processes while running
     pub procs: f64,
+    /// last taskbar window title recorded for this program, if it ever had one
+    #[serde(skip_serializing)]
+    pub window_title: Option<String>,
 }
 
+/// The raw file description of one app (not the view's window-title swap).
+pub fn app_description(conn: &Connection, app: &str) -> Result<Option<String>> {
+    conn.query_row("SELECT description FROM apps WHERE app = ?1", params![app], |r| r.get(0))
+        .optional()
+        .map(Option::flatten)
+}
+
+/// Totals over a time range read the raw file description (not the app_names view, which swaps in a window
+/// title for runtimes); describe::summary_name decides the name.
 pub fn app_summaries(conn: &Connection, from: i64, to: i64) -> Result<Vec<AppSummary>> {
     let mut stmt = conn.prepare(
         "SELECT m.app, a.description, AVG(m.cpu_avg), MAX(m.cpu_max), SUM(m.cpu_avg) / 100.0,
-                AVG(m.mem_avg), MAX(m.mem_max), SUM(m.io_bytes), COUNT(*), AVG(m.procs)
-         FROM app_minutes m LEFT JOIN app_names a ON a.app = m.app
+                AVG(m.mem_avg), MAX(m.mem_max), SUM(m.io_bytes), COUNT(*), AVG(m.procs), a.window_title
+         FROM app_minutes m LEFT JOIN apps a ON a.app = m.app
          WHERE m.minute >= ?1 AND m.minute <= ?2
          GROUP BY m.app
          ORDER BY SUM(m.cpu_avg) DESC",
@@ -558,6 +572,7 @@ pub fn app_summaries(conn: &Connection, from: i64, to: i64) -> Result<Vec<AppSum
             io_total: r.get::<_, i64>(7)? as u64,
             minutes: r.get(8)?,
             procs: r.get(9)?,
+            window_title: r.get(10)?,
         })
     })?;
     rows.collect()
@@ -613,7 +628,7 @@ pub fn weekday_hour_app_cpu(conn: &Connection, app: &str, from: i64, to: i64) ->
 pub fn top_apps_in(conn: &Connection, from: i64, to: i64, n: usize) -> Result<Vec<(String, Option<String>, f64)>> {
     let mut stmt = conn.prepare(
         "SELECT m.app, a.description, SUM(m.cpu_avg) / MAX(1, (SELECT COUNT(DISTINCT minute) FROM app_minutes WHERE minute >= ?1 AND minute <= ?2))
-         FROM app_minutes m LEFT JOIN app_names a ON a.app = m.app
+         FROM app_minutes m LEFT JOIN apps a ON a.app = m.app
          WHERE m.minute >= ?1 AND m.minute <= ?2
          GROUP BY m.app ORDER BY SUM(m.cpu_avg) DESC LIMIT ?3",
     )?;
@@ -625,7 +640,7 @@ pub fn top_apps_in(conn: &Connection, from: i64, to: i64, n: usize) -> Result<Ve
 pub fn top_mem_apps_in(conn: &Connection, from: i64, to: i64, n: usize) -> Result<Vec<(String, Option<String>, f64)>> {
     let mut stmt = conn.prepare(
         "SELECT m.app, a.description, AVG(m.mem_avg)
-         FROM app_minutes m LEFT JOIN app_names a ON a.app = m.app
+         FROM app_minutes m LEFT JOIN apps a ON a.app = m.app
          WHERE m.minute >= ?1 AND m.minute <= ?2
          GROUP BY m.app ORDER BY AVG(m.mem_avg) DESC LIMIT ?3",
     )?;

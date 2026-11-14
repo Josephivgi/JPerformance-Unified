@@ -84,15 +84,27 @@ fn detail(p: &sysinfo::Process) -> String {
     if AGENTS.contains(&name.as_str()) {
         return if cwd.is_empty() { String::new() } else { format!("in {cwd}") };
     }
+    // Text tools take a pattern or a count, not a program, as their first argument ("grep after").
+    if matches!(name.as_str(), "grep" | "findstr" | "rg" | "sed" | "awk" | "head" | "tail" | "cat" | "sleep" | "timeout" | "sort" | "wc" | "less" | "more") {
+        return String::new();
+    }
     let arg = p
         .cmd()
         .iter()
         .skip(1)
         .map(|a| a.to_string_lossy().to_string())
-        .find(|a| !a.starts_with('-') && !a.is_empty());
+        // Skip switches: "-x", "--flag" and Windows "/c" style ones, so `cmd /c npm run dev` shows the command.
+        // "." (run the current folder, as in `electron .`) says nothing either.
+        // A bare number ("timeout 250") is a count or delay, not what runs.
+        .find(|a| !a.is_empty() && a != "." && !a.chars().all(|c| c.is_ascii_digit()) &&!a.starts_with('-') && !(a.starts_with('/') && a.len() <= 3 && !a[1..].contains('/')));
     let Some(arg) = arg else { return String::new() };
-    let short = if arg.contains(['\\', '/']) {
-        let parts: Vec<&str> = arg.split(['\\', '/']).filter(|s| !s.is_empty()).collect();
+    // An id ("pfhostedapp:4881a620ef...") or a long inline script names nothing a person knows.
+    if (!arg.contains(['\\', '/']) && arg.len() > 40) || arg.contains("pfhostedapp:") || arg.starts_with("0x") {
+        return String::new();
+    }
+    let short =if arg.contains(['\\', '/']) {
+        // Hidden and package folders (".bin", "node_modules") say nothing about what runs.
+        let parts: Vec<&str> = arg.split(['\\', '/']).filter(|s| !s.is_empty() && !s.starts_with('.') && *s != "node_modules").collect();
         parts[parts.len().saturating_sub(2)..].join("/")
     } else {
         arg

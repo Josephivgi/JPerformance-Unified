@@ -29,8 +29,28 @@ const SPIKE_MIN_SECS: i64 = 60;
 const MEM_PRESSURE: f64 = 90.0;
 const COMMIT_PRESSURE: f64 = 90.0;
 
+/// Insights cover a stretch of time, so a shared runtime is named by its program file, not its last window.
 fn name(app: &str, desc: &Option<String>) -> String {
-    describe::display_name(app, desc.as_deref())
+    describe::summary_name(app, desc.as_deref())
+}
+
+/// What the app is, as trailing sentences. Leading sentences that only repeat the name are dropped
+/// ("Google Chrome. Each tab..." becomes "Each tab..."), the same rule the window uses under app names.
+fn about(app: &str, desc: &Option<String>) -> String {
+    let ex = describe::summary_explain(app, desc.as_deref());
+    let shown = name(app, desc).to_lowercase();
+    let mut rest = ex.trim();
+    loop {
+        // A sentence ends at ". " followed by a capital letter.
+        let cut = rest.match_indices(". ").find(|(i, _)| rest[i + 2..].starts_with(|c: char| c.is_uppercase())).map(|(i, _)| i);
+        let first = cut.map_or(rest, |i| &rest[..i]).trim_end_matches('.').trim().to_lowercase();
+        let repeats = !first.is_empty() && (shown.contains(&first) || (first.contains(&shown) && first.len() <= shown.len() + 12));
+        if !repeats {
+            break;
+        }
+        rest = cut.map_or("", |i| rest[i + 2..].trim());
+    }
+    if rest.is_empty() { String::new() } else { format!(" {rest}") }
 }
 
 fn culprits(conn: &Connection, from: i64, to: i64) -> String {
@@ -148,11 +168,11 @@ pub fn compute(conn: &Connection, from: i64, to: i64) -> db::Result<Vec<Insight>
                     100.0 * a.cpu_load / total_load.max(f64::EPSILON)
                 ),
                 detail: format!(
-                    "It averaged {} of your CPU over {} of activity and peaked at {}. {}",
+                    "It averaged {} of your CPU over {} of activity and peaked at {}.{}",
                     fmt::pct(a.cpu_avg),
                     fmt::duration(a.minutes * 60),
                     fmt::pct(a.cpu_peak),
-                    describe::explain(&a.app, a.description.as_deref())
+                    about(&a.app, &a.description)
                 ),
                 at: None,
                 action: None,
@@ -165,9 +185,9 @@ pub fn compute(conn: &Connection, from: i64, to: i64) -> db::Result<Vec<Insight>
             severity: Severity::Info,
             title: format!("{} used the most memory ({} on average)", name(&a.app, &a.description), fmt::bytes(a.mem_avg)),
             detail: format!(
-                "Its peak was {}. {}",
+                "Its peak was {}.{}",
                 fmt::bytes(a.mem_peak as f64),
-                describe::explain(&a.app, a.description.as_deref())
+                about(&a.app, &a.description)
             ),
             at: None,
             action: None,

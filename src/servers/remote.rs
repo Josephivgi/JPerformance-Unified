@@ -41,6 +41,10 @@ pub fn classify(stderr: &str, timed_out: bool) -> Failure {
         ("down", "Unreachable")
     } else if s.contains("connection closed") || s.contains("connection reset") || s.contains("broken pipe") {
         ("lost", "Connection lost")
+    } else if s.contains("connect to host") {
+        // ssh could not open the network connection at all (for example "Unknown error" while the
+        // PC's network drops), so nothing was tried with the key: keep retrying on its own.
+        ("down", "Unreachable")
     } else {
         ("error", "Login failed")
     };

@@ -89,7 +89,7 @@ pub fn connection_hint(status: &str, alias: &str) -> &'static str {
         "dns" => "The host name in ~/.ssh/config could not be looked up.",
         "denied" => "The server did not accept your key. Check that the public key is in ~/.ssh/authorized_keys on the server for this user. Fix that, then press Retry.",
         "hostkey" => "The server's host key is not in known_hosts, or it changed. JPerformance never accepts host keys by itself. Run ssh once in a terminal to check and accept it.",
-        "lost" => "The connection dropped and logging in again did not work. Press Retry when the server is back.",
+        "lost" => "The connection dropped and logging in again did not work yet. It tries again on its own; Retry now does it at once.",
         _ => "",
     }
 }
@@ -110,7 +110,10 @@ pub fn compute(conn: &Connection, server: &db::Server, from: i64, to: i64) -> db
 
     if !matches!(server.status.as_str(), "up" | "connecting" | "paused" | "") {
         let hint = connection_hint(&server.status, alias);
-        add(&mut out, Level::Danger, format!("Cannot log in: {}", server.label.to_lowercase()), if hint.is_empty() { server.detail.clone() } else { hint.to_string() });
+        // Network trouble never reached the login, and the recorder retries it on its own.
+        let verb = if matches!(server.status.as_str(), "timeout" | "lost" | "down" | "dns" | "refused") { "Cannot reach" } else { "Cannot log in" };
+        let title = if server.status == "down" { "Cannot reach the server".to_string() } else { format!("{verb}: {}", server.label.to_lowercase()) };
+        add(&mut out, Level::Danger, title, if hint.is_empty() { server.detail.clone() } else { hint.to_string() });
     }
 
     let latest = db::latest(conn, alias)?.filter(|p| now - p.ts < 120);

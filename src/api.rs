@@ -160,10 +160,16 @@ fn pc_net(conn: &Connection) -> (f64, f64) {
 fn live_json(rows: &[ldb::LiveRow]) -> Vec<Value> {
     rows.iter()
         .map(|r| {
+            let runtime = ldesc::is_runtime(&r.app);
+            // A runtime, or a program with no file description, is named by its program file; the window open
+            // right now (never the last title ever seen) is the hint.
+            let no_desc = r.description.as_deref().map_or(true, |d| d.trim().is_empty() || ldesc::names_only_runtime(&r.app, d));
+            let window_now = if runtime || no_desc { r.titles.as_deref().and_then(|t| t.split(" | ").find(|w| !w.is_empty())).map(str::to_string) } else { None };
             json!({
                 "app": r.app,
-                "name": ldesc::display_name(&r.app, r.description.as_deref()),
-                "explain": ldesc::explain(&r.app, r.description.as_deref()),
+                "name": ldesc::summary_name(&r.app, r.description.as_deref()),
+                "explain": ldesc::summary_explain(&r.app, r.description.as_deref()),
+                "window_now": window_now,
                 "cpu": r.cpu,
                 "mem": r.mem,
                 "io_rate": r.io_rate,
@@ -171,6 +177,7 @@ fn live_json(rows: &[ldb::LiveRow]) -> Vec<Value> {
                 "titles": r.titles,
                 "private": r.private,
                 "protected": procs::is_protected(&r.app, r.exe_path.as_deref()),
+                "runtime": runtime,
             })
         })
         .collect()
@@ -192,8 +199,8 @@ fn pc_summary(conn: &Connection) -> Result<Value, String> {
         "net_in": rx,
         "net_out": tx,
         "disks": disks(),
-        "top_mem": top_mem.map(|r| json!({ "app": r.app, "name": ldesc::display_name(&r.app, r.description.as_deref()), "mem": r.mem })),
-        "top_cpu": top_cpu.map(|r| json!({ "app": r.app, "name": ldesc::display_name(&r.app, r.description.as_deref()), "cpu": r.cpu })),
+        "top_mem": top_mem.map(|r| json!({ "app": r.app, "name": ldesc::summary_name(&r.app, r.description.as_deref()), "mem": r.mem })),
+        "top_cpu": top_cpu.map(|r| json!({ "app": r.app, "name": ldesc::summary_name(&r.app, r.description.as_deref()), "cpu": r.cpu })),
         "heartbeat": status.map(|s| s.heartbeat),
     }))
 }
@@ -261,7 +268,7 @@ fn server_findings(conn: &Connection, s: &sdb::Server, from: i64, to: i64) -> Ve
         .unwrap_or_default()
         .into_iter()
         .map(|i| {
-            let login = failed(&s.status) && i.title.starts_with("Cannot log in");
+            let login = failed(&s.status) && (i.title.starts_with("Cannot log in") || i.title.starts_with("Cannot reach"));
             json!({
                 "level": level(i.level),
                 "title": i.title,
@@ -414,19 +421,34 @@ async fn pc_history(app: tauri::State<'_, App>, range: i64, which: Option<String
     let from = to - range;
     let bucket = bucket_for(range);
     let heat_from = to - range.max(7 * 86_400);
+    // Display names for a total over this range, so closed apps and runtimes are named the same everywhere.
+    let name_of = |a: &ldb::AppSummary| (a.app.clone(), json!(ldesc::summary_name(&a.app, a.description.as_deref())));
     match which.filter(|a| !a.is_empty()) {
-        Some(a) => Ok(json!({
+        Some(a) => {
+            // A runtime with no summary yet is still named by its program file, not a window title.
+            // One name only, so read one description instead of summing the whole range.
+            let mut names = serde_json::Map::new();
+            let desc = ldb::app_description(&l, &a).map_err(e)?;
+            names.insert(a.clone(), json!(ldesc::summary_name(&a, desc.as_deref())));
+            Ok(json!({
             "bucket": bucket.max(60),
             "app": a,
             "points": ldb::app_series(&l, &a, from, to, bucket).map_err(e)?,
             "heat": ldb::weekday_hour_app_cpu(&l, &a, heat_from, to).map_err(e)?,
-        })),
-        None => Ok(json!({
-            "bucket": bucket,
-            "points": ldb::system_series(&l, from, to, bucket).map_err(e)?,
-            "heat": ldb::weekday_hour_cpu(&l, heat_from, to).map_err(e)?,
-            "apps": ldb::app_summaries(&l, from, to).map_err(e)?.into_iter().take(40).map(|a| a.app).collect::<Vec<_>>(),
-        })),
+            "names": names,
+            }))
+        }
+        None => {
+            let top: Vec<_> = ldb::app_summaries(&l, from, to).map_err(e)?.into_iter().take(40).collect();
+            let names: serde_json::Map<String, Value> = top.iter().map(name_of).collect();
+            Ok(json!({
+                "bucket": bucket,
+                "points": ldb::system_series(&l, from, to, bucket).map_err(e)?,
+                "heat": ldb::weekday_hour_cpu(&l, heat_from, to).map_err(e)?,
+                "apps": top.iter().map(|a| a.app.clone()).collect::<Vec<_>>(),
+                "names": names,
+            }))
+        }
     }
 }
 
@@ -438,7 +460,7 @@ async fn pc_moment(app: tauri::State<'_, App>, ts: i64, bucket: i64) -> Res {
     if ldb::top_apps_in(&l, from, to, 1).map_err(e)?.is_empty() {
         from -= 120;
     }
-    let name = |a: &str, d: &Option<String>| ldesc::display_name(a, d.as_deref());
+    let name = |a: &str, d: &Option<String>| ldesc::summary_name(a, d.as_deref());
     let cpu: Vec<Value> = ldb::top_apps_in(&l, from, to, 5).map_err(e)?.iter().map(|(a, d, v)| json!({ "name": name(a, d), "v": v })).collect();
     let mem: Vec<Value> = ldb::top_mem_apps_in(&l, from, to, 5).map_err(e)?.iter().map(|(a, d, v)| json!({ "name": name(a, d), "v": v })).collect();
     Ok(json!({ "cpu": cpu, "mem": mem }))
@@ -453,8 +475,14 @@ async fn pc_apps(app: tauri::State<'_, App>, range: i64) -> Res {
         .into_iter()
         .map(|a| {
             let mut v = serde_json::to_value(&a).unwrap_or(Value::Null);
-            v["name"] = json!(ldesc::display_name(&a.app, a.description.as_deref()));
-            v["explain"] = json!(ldesc::explain(&a.app, a.description.as_deref()));
+            v["name"] = json!(ldesc::summary_name(&a.app, a.description.as_deref()));
+            v["explain"] = json!(ldesc::summary_explain(&a.app, a.description.as_deref()));
+            // A runtime's total covers every app it ran; the last window seen is only a hint.
+            if ldesc::is_runtime(&a.app) {
+                if let Some(t) = a.window_title.as_deref().filter(|t| !t.is_empty()) {
+                    v["window"] = json!(t);
+                }
+            }
             v
         })
         .collect();
@@ -521,7 +549,7 @@ async fn pc_tree(app: tauri::State<'_, App>) -> Res {
     *app.procs.lock().unwrap() = Some((sys, Instant::now()));
     *app.cleanup_n.lock().unwrap() = Some((Instant::now(), suggestions.len()));
     Ok(json!({
-        "groups": groups.into_iter().take(60).collect::<Vec<_>>(),
+        "groups": groups,
         "suggestions": suggestions,
         "log": log,
         "auto": auto,
@@ -730,7 +758,7 @@ async fn recordings(app: tauri::State<'_, App>) -> Res {
     let mut apps: Vec<Value> = live
         .iter()
         .filter(|r| !procs::is_protected(&r.app, r.exe_path.as_deref()))
-        .map(|r| json!({ "app": r.app, "name": ldesc::display_name(&r.app, r.description.as_deref()), "mem": r.mem }))
+        .map(|r| json!({ "app": r.app, "name": ldesc::summary_name(&r.app, r.description.as_deref()), "mem": r.mem }))
         .collect();
     apps.sort_by(|a, b| a["app"].as_str().unwrap_or("").to_lowercase().cmp(&b["app"].as_str().unwrap_or("").to_lowercase()));
     let active: Vec<Value> = list

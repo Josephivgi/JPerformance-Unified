@@ -203,7 +203,8 @@ pub fn run(stop: &AtomicBool) -> Result<(), String> {
                 mem: n.mem,
                 io_rate: n.io as f64 * 1000.0 / elapsed_ms as f64,
                 procs: n.procs,
-                titles: titles.get(name).map(|t| t.join(" | ").chars().take(400).collect()),
+                // Every open window, so the Running row shows all the windows Stop would close.
+                titles: titles.get(name).map(|t| t.join(" | ")),
                 private: n.private,
             })
             .collect();
