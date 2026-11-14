@@ -431,6 +431,7 @@ async function pageRamCleanup() {
   const runs = d.runs || [], leaks = d.leaks || [];
   const open = leaks.filter(l => !l.resolved).sort((a, b) => b.rate - a.rate);
   const gone = leaks.filter(l => l.resolved).sort((a, b) => b.rate - a.rate);
+  const goneShown = S.showAll.has('ramgone') ? gone : gone.slice(0, 10);
   const total = d.total || { freed: 0, passes: 0, last: null };
   const byApp = d.by_app || [];
   const appN = new Set(byApp.map(a => a.app)).size;
@@ -481,8 +482,9 @@ async function pageRamCleanup() {
     <section class="panel"><div class="panel-head"><h2>Memory leaks it found</h2><span class="hint">An app that kept taking memory and never gave it back: it climbed for at least 2 hours, still holds 200 MB more than it started with, gained at least 30 MB an hour, used little of the processor while it grew, and is still climbing. Closing and reopening the app gives it a fresh start. Memory the cleaner empties from a leak comes back as the app fills up again, which is how it shows.</span><span class="grow"></span>${looked ? `<span class="lbl muted">Checked ${ago(looked)}</span>` : ''}</div>
       ${open.length || gone.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th>App</th><th class="sparkcell">Last day</th><th class="r" title="How much more memory it holds than when it started climbing">Grew</th><th class="r" title="Fastest first">Speed</th><th class="r opt">While it grew</th><th class="r opt2" title="Memory the cleaner has freed from it during this climb">Freed by the cleaner</th></tr></thead><tbody>
         ${open.map(leakRow).join('')}
-        ${gone.length ? `<tr class="dup-h"><td colspan="6"><b style="font-weight:600">No longer growing</b> <span class="muted">· it was closed, or it let the memory go</span></td></tr>${gone.slice(0, 10).map(leakRow).join('')}` : ''}
-        </tbody></table></div>`
+        ${gone.length ? `<tr class="dup-h"><td colspan="6"><b style="font-weight:600">No longer growing</b> <span class="muted">· it was closed, or it let the memory go</span></td></tr>${goneShown.map(leakRow).join('')}` : ''}
+        </tbody></table></div>
+        ${gone.length > 10 && !S.showAll.has('ramgone') ? `<div class="panel-body toolbar"><span class="muted grow">Showing the 10 fastest of ${gone.length} that stopped.</span><button class="btn small ghost" data-showall="ramgone">Show all</button></div>` : ''}`
         : `<div class="empty">No leak right now. The recorder looks again every 5 minutes, at apps that have been running for hours, so one that starts leaking shows up within a couple of hours.</div>`}</section>
     <section class="panel"><div class="panel-head"><h2>Where the memory came from</h2><span class="hint">Every pass adds up here, so an app that is emptied again and again shows at the top.</span></div>
       ${byApp.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th>App</th><th class="r">Times freed</th><th class="r">Last time</th><th style="width:220px">Freed in total</th></tr></thead><tbody>
