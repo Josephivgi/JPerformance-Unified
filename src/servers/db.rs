@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS collector_status (
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.busy_timeout(std::time::Duration::from_secs(15))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.execute_batch(SCHEMA)?;
@@ -275,7 +275,7 @@ pub fn set_connected(conn: &Connection, alias: &str, info: &Info, login_ms: u64,
 // ---------- samples ----------
 
 pub fn write_sample(conn: &mut Connection, alias: &str, s: &Sample) -> Result<()> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     tx.execute(
         "INSERT OR REPLACE INTO samples(server, ts, cpu, iowait, steal, mem_total, mem_avail, mem_free, arc, swap_total, swap_used,
             load1, load5, load15, uptime, net_rx, net_tx, disk_read, disk_write, disk_busy, procs, oom_kills)
@@ -316,7 +316,7 @@ pub struct GroupMinute<'a> {
 }
 
 pub fn write_minute(conn: &mut Connection, alias: &str, minute: i64, rows: &[GroupMinute]) -> Result<()> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     {
         let mut g = tx.prepare(
             "INSERT INTO groups(server, key, kind, label, main, explain) VALUES (?1,?2,?3,?4,?5,?6)
@@ -383,8 +383,19 @@ impl Point {
     pub fn mem_used(&self) -> f64 {
         (self.mem_total - self.mem_avail).max(0.0)
     }
+    /// ZFS cache Linux can take back when programs need memory. ZFS keeps at least
+    /// zfs_arc_min (by default 1/32 of RAM); the rest is given back on demand.
+    pub fn arc_reclaimable(&self) -> f64 {
+        (self.arc - self.mem_total / 32.0).max(0.0)
+    }
+    /// Memory programs can still get, counting the ZFS cache that would be given back.
+    pub fn mem_avail_eff(&self) -> f64 {
+        (self.mem_avail + self.arc_reclaimable()).min(self.mem_total)
+    }
+    /// Share of memory in use by programs. ZFS cache that can be given back is not counted,
+    /// so a ZFS server with a full cache does not look out of memory.
     pub fn mem_pct(&self) -> f64 {
-        if self.mem_total > 0.0 { self.mem_used() / self.mem_total * 100.0 } else { 0.0 }
+        if self.mem_total > 0.0 { (self.mem_total - self.mem_avail_eff()).max(0.0) / self.mem_total * 100.0 } else { 0.0 }
     }
     pub fn swap_pct(&self) -> f64 {
         if self.swap_total > 0.0 { self.swap_used / self.swap_total * 100.0 } else { 0.0 }

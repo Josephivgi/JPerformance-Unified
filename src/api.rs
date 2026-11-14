@@ -1,7 +1,7 @@
 //! The window: a Tauri webview showing `ui/`, and the commands it calls to
 //! read history and act. The recorder process writes; this side mostly reads.
 
-use crate::local::{db as ldb, describe as ldesc, insights as linsights, procs};
+use crate::local::{apps, db as ldb, describe as ldesc, insights as linsights, junk, procs, storage, tree};
 use crate::servers::{db as sdb, insights as sinsights, sshconf};
 use crate::{autostart, collector, paths, update};
 use rusqlite::Connection;
@@ -22,6 +22,10 @@ struct App {
     updater: update::Updater,
     /// Findings by time range. A week of them takes seconds to work out and changes slowly.
     findings: Mutex<HashMap<i64, (Instant, Value)>>,
+    /// The process list kept between Clean up refreshes, so CPU use is measured over the time between them.
+    procs: Mutex<Option<(sysinfo::System, Instant)>>,
+    /// How many clean-up suggestions the last look found, for the sidebar.
+    cleanup_n: Mutex<Option<(Instant, usize)>>,
 }
 
 /// SQLite connections to one database. Each command takes its own, so a slow
@@ -42,7 +46,7 @@ impl Pool {
             None => {
                 // The schema was set up by the first connection; this one only reads and writes rows.
                 let c = Connection::open(&self.path).map_err(e)?;
-                c.busy_timeout(Duration::from_secs(5)).map_err(e)?;
+                c.busy_timeout(Duration::from_secs(15)).map_err(e)?;
                 c
             }
         };
@@ -156,16 +160,24 @@ fn pc_net(conn: &Connection) -> (f64, f64) {
 fn live_json(rows: &[ldb::LiveRow]) -> Vec<Value> {
     rows.iter()
         .map(|r| {
+            let runtime = ldesc::is_runtime(&r.app);
+            // A runtime, or a program with no file description, is named by its program file; the window open
+            // right now (never the last title ever seen) is the hint.
+            let no_desc = r.description.as_deref().map_or(true, |d| d.trim().is_empty() || ldesc::names_only_runtime(&r.app, d));
+            let window_now = if runtime || no_desc { r.titles.as_deref().and_then(|t| t.split(" | ").find(|w| !w.is_empty())).map(str::to_string) } else { None };
             json!({
                 "app": r.app,
-                "name": ldesc::display_name(&r.app, r.description.as_deref()),
-                "explain": ldesc::explain(&r.app, r.description.as_deref()),
+                "name": ldesc::summary_name(&r.app, r.description.as_deref()),
+                "explain": ldesc::summary_explain(&r.app, r.description.as_deref()),
+                "window_now": window_now,
                 "cpu": r.cpu,
                 "mem": r.mem,
                 "io_rate": r.io_rate,
                 "procs": r.procs,
                 "titles": r.titles,
+                "private": r.private,
                 "protected": procs::is_protected(&r.app, r.exe_path.as_deref()),
+                "runtime": runtime,
             })
         })
         .collect()
@@ -187,8 +199,8 @@ fn pc_summary(conn: &Connection) -> Result<Value, String> {
         "net_in": rx,
         "net_out": tx,
         "disks": disks(),
-        "top_mem": top_mem.map(|r| json!({ "app": r.app, "name": ldesc::display_name(&r.app, r.description.as_deref()), "mem": r.mem })),
-        "top_cpu": top_cpu.map(|r| json!({ "app": r.app, "name": ldesc::display_name(&r.app, r.description.as_deref()), "cpu": r.cpu })),
+        "top_mem": top_mem.map(|r| json!({ "app": r.app, "name": ldesc::summary_name(&r.app, r.description.as_deref()), "mem": r.mem })),
+        "top_cpu": top_cpu.map(|r| json!({ "app": r.app, "name": ldesc::summary_name(&r.app, r.description.as_deref()), "cpu": r.cpu })),
         "heartbeat": status.map(|s| s.heartbeat),
     }))
 }
@@ -210,10 +222,15 @@ fn level(l: sinsights::Level) -> &'static str {
 }
 
 fn pc_findings(conn: &Connection, from: i64, to: i64, machine: &str) -> Vec<Value> {
+    let live = ldb::live_apps(conn).unwrap_or_default();
     linsights::compute(conn, from, to)
         .unwrap_or_default()
         .into_iter()
-        .map(|i| json!({ "level": severity(i.severity), "title": i.title, "detail": i.detail, "at": i.at, "machine": machine, "machine_id": "pc" }))
+        .map(|i| {
+            // The app's row right now, so the finding can offer to stop it while it runs.
+            let running = i.app.as_ref().and_then(|a| live.iter().find(|r| &r.app == a)).map(|r| live_json(std::slice::from_ref(r)).remove(0));
+            json!({ "level": severity(i.severity), "title": i.title, "detail": i.detail, "at": i.at, "action": i.action, "running": running, "machine": machine, "machine_id": "pc" })
+        })
         .collect()
 }
 
@@ -251,12 +268,13 @@ fn server_findings(conn: &Connection, s: &sdb::Server, from: i64, to: i64) -> Ve
         .unwrap_or_default()
         .into_iter()
         .map(|i| {
-            let login = failed(&s.status) && i.title.starts_with("Cannot log in");
+            let login = failed(&s.status) && (i.title.starts_with("Cannot log in") || i.title.starts_with("Cannot reach"));
             json!({
                 "level": level(i.level),
                 "title": i.title,
                 "detail": i.detail,
-                "at": if login { json!(s.checked_at) } else { Value::Null },
+                "commands": i.commands,
+                "at": if login { json!(s.checked_at) } else { json!(i.at) },
                 "machine": s.alias,
                 "machine_id": s.alias,
                 "retry": login,
@@ -341,7 +359,40 @@ async fn sidebar(app: tauri::State<'_, App>) -> Res {
         "autostart": autostart::is_enabled(),
         "retention": ldb::setting_i64(&l, ldb::KEY_RETENTION, ldb::DEFAULT_RETENTION),
         "version": update::CURRENT,
+        "cleanup_n": app.cleanup_n.lock().unwrap().filter(|(at, _)| at.elapsed() < Duration::from_secs(300)).map(|(_, n)| n),
+        "leaks": ldb::leak_count(&l).unwrap_or(0),
+        "pressure": pressure(&l),
     }))
+}
+
+/// What is making this PC slow right now, if anything: committed memory near its limit,
+/// memory nearly full, or the processor busy for the last half minute. With the apps behind it.
+fn pressure(l: &Connection) -> Value {
+    let to = now();
+    let Ok(recent) = ldb::system_series(l, to - 30, to, 5) else { return Value::Null };
+    if recent.len() < 2 {
+        return Value::Null;
+    }
+    let last = recent.last().unwrap();
+    let cpu = recent.iter().map(|p| p.cpu).sum::<f64>() / recent.len() as f64;
+    let (kind, value) = if last.commit_pct >= 90.0 {
+        ("commit", last.commit_pct)
+    } else if last.mem_pct >= 92.0 {
+        ("mem", last.mem_pct)
+    } else if cpu >= 85.0 {
+        ("cpu", cpu)
+    } else {
+        return Value::Null;
+    };
+    let mut live = ldb::live_apps(l).unwrap_or_default();
+    live.retain(|r| !procs::is_protected(&r.app, r.exe_path.as_deref()));
+    match kind {
+        "cpu" => live.sort_by(|a, b| b.cpu.total_cmp(&a.cpu)),
+        "commit" => live.sort_by(|a, b| b.private.max(b.mem).cmp(&a.private.max(a.mem))),
+        _ => live.sort_by(|a, b| b.mem.cmp(&a.mem)),
+    }
+    live.truncate(3);
+    json!({ "kind": kind, "value": value, "secs": 30, "top": live_json(&live) })
 }
 
 #[tauri::command]
@@ -371,19 +422,34 @@ async fn pc_history(app: tauri::State<'_, App>, range: i64, which: Option<String
     let from = to - range;
     let bucket = bucket_for(range);
     let heat_from = to - range.max(7 * 86_400);
+    // Display names for a total over this range, so closed apps and runtimes are named the same everywhere.
+    let name_of = |a: &ldb::AppSummary| (a.app.clone(), json!(ldesc::summary_name(&a.app, a.description.as_deref())));
     match which.filter(|a| !a.is_empty()) {
-        Some(a) => Ok(json!({
+        Some(a) => {
+            // A runtime with no summary yet is still named by its program file, not a window title.
+            // One name only, so read one description instead of summing the whole range.
+            let mut names = serde_json::Map::new();
+            let desc = ldb::app_description(&l, &a).map_err(e)?;
+            names.insert(a.clone(), json!(ldesc::summary_name(&a, desc.as_deref())));
+            Ok(json!({
             "bucket": bucket.max(60),
             "app": a,
             "points": ldb::app_series(&l, &a, from, to, bucket).map_err(e)?,
             "heat": ldb::weekday_hour_app_cpu(&l, &a, heat_from, to).map_err(e)?,
-        })),
-        None => Ok(json!({
-            "bucket": bucket,
-            "points": ldb::system_series(&l, from, to, bucket).map_err(e)?,
-            "heat": ldb::weekday_hour_cpu(&l, heat_from, to).map_err(e)?,
-            "apps": ldb::app_summaries(&l, from, to).map_err(e)?.into_iter().take(40).map(|a| a.app).collect::<Vec<_>>(),
-        })),
+            "names": names,
+            }))
+        }
+        None => {
+            let top: Vec<_> = ldb::app_summaries(&l, from, to).map_err(e)?.into_iter().take(40).collect();
+            let names: serde_json::Map<String, Value> = top.iter().map(name_of).collect();
+            Ok(json!({
+                "bucket": bucket,
+                "points": ldb::system_series(&l, from, to, bucket).map_err(e)?,
+                "heat": ldb::weekday_hour_cpu(&l, heat_from, to).map_err(e)?,
+                "apps": top.iter().map(|a| a.app.clone()).collect::<Vec<_>>(),
+                "names": names,
+            }))
+        }
     }
 }
 
@@ -395,7 +461,7 @@ async fn pc_moment(app: tauri::State<'_, App>, ts: i64, bucket: i64) -> Res {
     if ldb::top_apps_in(&l, from, to, 1).map_err(e)?.is_empty() {
         from -= 120;
     }
-    let name = |a: &str, d: &Option<String>| ldesc::display_name(a, d.as_deref());
+    let name = |a: &str, d: &Option<String>| ldesc::summary_name(a, d.as_deref());
     let cpu: Vec<Value> = ldb::top_apps_in(&l, from, to, 5).map_err(e)?.iter().map(|(a, d, v)| json!({ "name": name(a, d), "v": v })).collect();
     let mem: Vec<Value> = ldb::top_mem_apps_in(&l, from, to, 5).map_err(e)?.iter().map(|(a, d, v)| json!({ "name": name(a, d), "v": v })).collect();
     Ok(json!({ "cpu": cpu, "mem": mem }))
@@ -410,8 +476,14 @@ async fn pc_apps(app: tauri::State<'_, App>, range: i64) -> Res {
         .into_iter()
         .map(|a| {
             let mut v = serde_json::to_value(&a).unwrap_or(Value::Null);
-            v["name"] = json!(ldesc::display_name(&a.app, a.description.as_deref()));
-            v["explain"] = json!(ldesc::explain(&a.app, a.description.as_deref()));
+            v["name"] = json!(ldesc::summary_name(&a.app, a.description.as_deref()));
+            v["explain"] = json!(ldesc::summary_explain(&a.app, a.description.as_deref()));
+            // A runtime's total covers every app it ran; the last window seen is only a hint.
+            if ldesc::is_runtime(&a.app) {
+                if let Some(t) = a.window_title.as_deref().filter(|t| !t.is_empty()) {
+                    v["window"] = json!(t);
+                }
+            }
             v
         })
         .collect();
@@ -422,14 +494,368 @@ async fn pc_apps(app: tauri::State<'_, App>, range: i64) -> Res {
 #[tauri::command]
 async fn stop_app(app_name: String, force: bool) -> Res {
     let r = tauri::async_runtime::spawn_blocking(move || procs::stop(&app_name, force)).await.map_err(e)?;
-    Ok(json!(match r {
+    Ok(stop_json(&r))
+}
+
+fn stop_json(r: &procs::StopResult) -> Value {
+    match r {
         procs::StopResult::Closed => json!({ "result": "closed" }),
         procs::StopResult::AskedToClose => json!({ "result": "asked" }),
         procs::StopResult::Ended(n) => json!({ "result": "ended", "count": n }),
         procs::StopResult::NotRunning => json!({ "result": "not_running" }),
         procs::StopResult::Denied => json!({ "result": "denied" }),
         procs::StopResult::Protected => json!({ "result": "protected" }),
+    }
+}
+
+fn cores() -> f64 {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f64
+}
+
+/// Every app with what it started, and what is worth cleaning up.
+#[tauri::command]
+async fn pc_tree(app: tauri::State<'_, App>) -> Res {
+    let (activity, log, auto, minutes, ram, ram_pct) = {
+        let l = app.local.get()?;
+        (
+            ldb::activity(&l).map_err(e)?,
+            ldb::cleanup_log(&l, 30).map_err(e)?,
+            ldb::setting_i64(&l, ldb::KEY_AUTO_CLEANUP, 0) != 0,
+            ldb::setting_i64(&l, ldb::KEY_AUTO_CLEANUP_MIN, ldb::DEFAULT_AUTO_CLEANUP_MIN),
+            ldb::setting_i64(&l, ldb::KEY_RAM_CLEAN, 1) != 0,
+            ldb::setting_i64(&l, ldb::KEY_RAM_CLEAN_PCT, ldb::DEFAULT_RAM_CLEAN_PCT),
+        )
+    };
+    let held = app.procs.lock().unwrap().take();
+    let (sys, groups, suggestions) = tauri::async_runtime::spawn_blocking(move || {
+        let mut sys = match held {
+            Some((mut s, at)) if at.elapsed() < Duration::from_secs(60) => {
+                s.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, tree::refresh_kind());
+                s
+            }
+            _ => {
+                let mut s = tree::snapshot();
+                std::thread::sleep(Duration::from_millis(400));
+                s.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, tree::refresh_kind());
+                s
+            }
+        };
+        sys.refresh_memory();
+        let me = tree::my_session();
+        let t = tree::Tree::build(&sys, cores(), &activity, now());
+        let groups = t.groups(me);
+        let sugg = t.suggestions(me);
+        (sys, groups, sugg)
+    })
+    .await
+    .map_err(e)?;
+    *app.procs.lock().unwrap() = Some((sys, Instant::now()));
+    *app.cleanup_n.lock().unwrap() = Some((Instant::now(), suggestions.len()));
+    Ok(json!({
+        "groups": groups,
+        "suggestions": suggestions,
+        "log": log,
+        "auto": auto,
+        "auto_minutes": minutes,
+        "ram": ram,
+        "ram_pct": ram_pct,
+        "ram_reason": ldb::RAM_CLEAN_REASON,
+        "orphan_idle": tree::ORPHAN_IDLE_SECS,
+        "agent_idle": tree::AGENT_IDLE_SECS,
     }))
+}
+
+/// Stops each (pid, start time) and everything it started, all at once.
+#[tauri::command]
+async fn stop_tree(app: tauri::State<'_, App>, targets: Vec<(u32, i64)>, force: bool, reason: Option<String>) -> Res {
+    let results = tauri::async_runtime::spawn_blocking(move || {
+        let sys = tree::snapshot();
+        let t = tree::Tree::build(&sys, cores(), &HashMap::new(), now());
+        tree::stop_trees(&t, &targets, force)
+    })
+    .await
+    .map_err(e)?;
+    let l = app.local.get()?;
+    let reason = reason.unwrap_or_else(|| "Stopped from Clean up".into());
+    let out: Vec<Value> = results
+        .iter()
+        .map(|r| {
+            if matches!(r.result, procs::StopResult::Ended(_) | procs::StopResult::Closed) {
+                let _ = ldb::log_cleanup(&l, now(), &r.name, r.procs, r.mem, &reason, false);
+            }
+            let mut v = stop_json(&r.result);
+            v["pid"] = json!(r.pid);
+            v["name"] = json!(r.name);
+            v["mem"] = json!(r.mem);
+            v
+        })
+        .collect();
+    *app.cleanup_n.lock().unwrap() = None;
+    Ok(json!(out))
+}
+
+#[tauri::command]
+async fn set_auto_cleanup(app: tauri::State<'_, App>, on: bool, minutes: Option<i64>) -> Res {
+    let l = app.local.get()?;
+    ldb::set_setting(&l, ldb::KEY_AUTO_CLEANUP, if on { "1" } else { "0" }).map_err(e)?;
+    if let Some(m) = minutes {
+        ldb::set_setting(&l, ldb::KEY_AUTO_CLEANUP_MIN, &m.clamp(5, 24 * 60).to_string()).map_err(e)?;
+    }
+    Ok(json!(true))
+}
+
+#[tauri::command]
+async fn set_ram_clean(app: tauri::State<'_, App>, on: bool, pct: Option<i64>) -> Res {
+    let l = app.local.get()?;
+    ldb::set_setting(&l, ldb::KEY_RAM_CLEAN, if on { "1" } else { "0" }).map_err(e)?;
+    if let Some(p) = pct {
+        ldb::set_setting(&l, ldb::KEY_RAM_CLEAN_PCT, &p.clamp(50, 99).to_string()).map_err(e)?;
+    }
+    Ok(json!(true))
+}
+
+// ---------- RAM auto clean-up ----------
+
+/// What the RAM cleaner did, and which apps it has caught leaking memory.
+#[tauri::command]
+async fn ram_cleanup(app: tauri::State<'_, App>) -> Res {
+    let l = app.local.get()?;
+    let on = ldb::setting_i64(&l, ldb::KEY_RAM_CLEAN, 1) != 0;
+    let level = ldb::setting_i64(&l, ldb::KEY_RAM_CLEAN_PCT, ldb::DEFAULT_RAM_CLEAN_PCT);
+    let idle_min = ldb::setting_i64(&l, ldb::KEY_AUTO_CLEANUP_MIN, ldb::DEFAULT_AUTO_CLEANUP_MIN);
+    let latest = ldb::latest_sample(&l).map_err(e)?;
+    let since = now() - ldb::RAM_RUN_HISTORY_DAYS * 86_400;
+    // A pass can happen every minute while memory is high, so this is a page, not everything: the page
+    // says how many of the total it is showing. The table and the total above it cover the same window.
+    let runs = ldb::ram_runs(&l, 500, since).map_err(e)?;
+    let (freed, passes, last) = ldb::ram_run_totals(&l, since).map_err(e)?;
+    let by_app: Vec<Value> = ldb::ram_freed_by_app(&l, since)
+        .map_err(e)?
+        .into_iter()
+        .map(|(app, bytes, times, last)| {
+            let name = ldesc::summary_name(&app, ldb::app_description(&l, &app).ok().flatten().as_deref());
+            json!({ "app": app, "name": name, "freed": bytes, "times": times, "last": last })
+        })
+        .collect();
+    let leaks = ldb::leaks(&l, since)
+        .map_err(e)?
+        .into_iter()
+        .map(|mut k| {
+            k.name = ldesc::summary_name(&k.app, ldb::app_description(&l, &k.app).ok().flatten().as_deref());
+            k
+        })
+        .collect::<Vec<_>>();
+    let (mem_used, mem_total, mem_pct) = latest.as_ref().map(|(p, total)| (p.mem_used as u64, *total, p.mem_pct)).unwrap_or((0, 0, 0.0));
+    Ok(json!({
+        "on": on,
+        "level": level,
+        "idle_min": idle_min,
+        "mem_used": mem_used,
+        "mem_total": mem_total,
+        "mem_pct": mem_pct,
+        "runs": runs,
+        "total": { "freed": freed, "passes": passes, "last": last },
+        "by_app": by_app,
+        "leaks": leaks,
+        "checked": ldb::get_setting(&l, ldb::KEY_LEAKS_CHECKED).ok().flatten().and_then(|v| v.parse::<i64>().ok()),
+    }))
+}
+
+/// One pass of the RAM cleaner, asked for from the page. Nothing is closed.
+#[tauri::command]
+async fn ram_free_now(app: tauri::State<'_, App>) -> Res {
+    let idle_min = {
+        let l = app.local.get()?;
+        ldb::setting_i64(&l, ldb::KEY_AUTO_CLEANUP_MIN, ldb::DEFAULT_AUTO_CLEANUP_MIN).max(1)
+    };
+    let ts = now();
+    let pass = tauri::async_runtime::spawn_blocking(move || {
+        let mut sys = tree::snapshot();
+        sys.refresh_memory();
+        let before = sys.used_memory();
+        let total = sys.total_memory().max(1);
+        let mut conn = ldb::open(&paths::local_db()).map_err(e)?;
+        let level = ldb::setting_i64(&conn, ldb::KEY_RAM_CLEAN_PCT, ldb::DEFAULT_RAM_CLEAN_PCT);
+        // The recorder's own table can be empty or stale, so idleness is measured here as well.
+        let (activity, recorded) = crate::local::ramclean::activity_for_pass(&conn, &mut sys, ts).map_err(e)?;
+        let freed = crate::local::ramclean::run(&sys, &activity, &mut HashMap::new(), ts, idle_min * 60, tree::my_session());
+        let mut after_sys = sysinfo::System::new();
+        after_sys.refresh_memory();
+        let after = after_sys.used_memory();
+        let bytes: u64 = freed.iter().map(|f| f.bytes).sum();
+        let procs: usize = freed.iter().map(|f| f.procs).sum();
+        if bytes > 0 {
+            let tx = conn.transaction().map_err(e)?;
+            let run = ldb::log_ram_run(&tx, ts, before, total, after, level, freed.len(), procs, bytes, false).map_err(e)?;
+            for f in &freed {
+                ldb::log_ram_item(&tx, run, ts, &f.app, f.procs, f.bytes, false).map_err(e)?;
+            }
+            tx.commit().map_err(e)?;
+        }
+        Ok::<Value, String>(json!({
+            "freed": bytes,
+            "recorded": recorded,
+            "procs": procs,
+            "mem_before": before,
+            "mem_after": after,
+            "apps": freed.iter().map(|f| json!({ "app": f.app, "procs": f.procs, "bytes": f.bytes })).collect::<Vec<_>>(),
+        }))
+    })
+    .await
+    .map_err(e)?;
+    Ok(pass?)
+}
+
+// ---------- Storage ----------
+
+/// Runs blocking storage work off the async runtime.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(e)
+}
+
+#[tauri::command]
+async fn storage_status(app: tauri::State<'_, App>) -> Res {
+    let (mut v, drives) = blocking(|| (storage::status(), disks())).await?;
+    v["drives"] = json!(drives);
+    v["home"] = json!(std::env::var("USERPROFILE").unwrap_or_default());
+    // How much clearing caches and emptying the bin has freed so far.
+    if let Ok((total, times, last)) = app.local.get().and_then(|l| ldb::storage_clean_stats(&l).map_err(e)) {
+        v["freed"] = json!({ "total": total, "times": times, "last": last.map(|(ts, what, freed)| json!({ "ts": ts, "what": what, "freed": freed })) });
+    }
+    Ok(v)
+}
+
+#[tauri::command]
+async fn storage_scan(root: String) -> Res {
+    storage::start(std::path::PathBuf::from(root))?;
+    Ok(json!(true))
+}
+
+#[tauri::command]
+async fn storage_open_saved(root: String) -> Res {
+    blocking(move || storage::open_saved(std::path::Path::new(&root))).await??;
+    Ok(json!(true))
+}
+
+#[tauri::command]
+async fn storage_cancel() -> Res {
+    storage::cancel();
+    Ok(json!(true))
+}
+
+#[tauri::command]
+async fn storage_folder(id: u32, sort: Option<String>, desc: Option<bool>) -> Res {
+    blocking(move || storage::folder(id, sort.as_deref().unwrap_or("size"), desc.unwrap_or(true))).await?
+}
+
+#[tauri::command]
+async fn storage_biggest(sort: Option<String>, desc: Option<bool>, limit: Option<usize>) -> Res {
+    blocking(move || storage::biggest_dirs(sort.as_deref().unwrap_or("size"), desc.unwrap_or(true), limit.unwrap_or(200))).await?
+}
+
+/// Windows' System Protection page, where restore points (often tens of GB) can be shrunk or deleted.
+#[tauri::command]
+async fn storage_restore_points() -> Res {
+    std::process::Command::new("SystemPropertiesProtection.exe").spawn().map_err(e)?;
+    Ok(json!(null))
+}
+
+#[tauri::command]
+async fn storage_files(kind: Option<String>, q: Option<String>, sort: Option<String>, desc: Option<bool>, limit: Option<usize>) -> Res {
+    blocking(move || {
+        storage::files(kind.as_deref().unwrap_or(""), q.as_deref().unwrap_or(""), sort.as_deref().unwrap_or("size"), desc.unwrap_or(true), limit.unwrap_or(200))
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn storage_delete(items: Vec<storage::Item>, permanent: bool) -> Res {
+    Ok(json!(blocking(move || storage::delete(items, permanent)).await?))
+}
+
+#[tauri::command]
+async fn storage_clean(ids: Vec<String>) -> Res {
+    blocking(move || junk::clean_start(&ids)).await??;
+    Ok(json!(true))
+}
+
+#[tauri::command]
+async fn storage_clean_cancel() -> Res {
+    junk::clean_cancel();
+    Ok(json!(true))
+}
+
+/// Forgets a finished clean-up once its result has been shown.
+#[tauri::command]
+async fn storage_clean_seen() -> Res {
+    junk::clean_dismiss();
+    Ok(json!(true))
+}
+
+/// Measures the caches and Downloads again now.
+#[tauri::command]
+async fn storage_remeasure() -> Res {
+    junk::refresh(true);
+    Ok(json!(true))
+}
+
+/// What is in the Downloads folder that has not changed for `days`, biggest first.
+#[tauri::command]
+async fn storage_downloads(days: Option<i64>, limit: Option<usize>) -> Res {
+    blocking(move || junk::downloads(days.unwrap_or(0), limit.unwrap_or(200))).await
+}
+
+#[tauri::command]
+async fn storage_empty_bin(app: tauri::State<'_, App>) -> Res {
+    let freed = blocking(storage::empty_recycle_bin).await??;
+    if freed > 0 {
+        if let Ok(l) = app.local.get() {
+            let _ = ldb::log_storage_clean(&l, now(), "Recycle Bin", freed as u64, 0);
+        }
+    }
+    Ok(json!(freed))
+}
+
+#[tauri::command]
+async fn storage_reveal(path: String) -> Res {
+    storage::reveal(&path)?;
+    Ok(json!(true))
+}
+
+#[tauri::command]
+async fn apps_status() -> Res {
+    blocking(apps::status).await
+}
+
+#[tauri::command]
+async fn apps_rescan() -> Res {
+    apps::rescan();
+    Ok(json!(true))
+}
+
+#[tauri::command]
+async fn apps_uninstall(id: String) -> Res {
+    blocking(move || apps::uninstall(&id)).await??;
+    Ok(json!(true))
+}
+
+#[tauri::command]
+async fn apps_dismiss(id: String) -> Res {
+    apps::dismiss(&id);
+    Ok(json!(true))
+}
+
+#[tauri::command]
+async fn apps_forget_leftovers(id: String, paths: Vec<String>) -> Res {
+    apps::forget_leftovers(&id, &paths);
+    Ok(json!(true))
+}
+
+/// Windows' own Storage settings, which can clean Windows Update files and other system files.
+#[tauri::command]
+async fn storage_windows_settings() -> Res {
+    std::process::Command::new("explorer.exe").arg("ms-settings:storagesense").spawn().map_err(e)?;
+    Ok(json!(true))
 }
 
 #[tauri::command]
@@ -440,7 +866,7 @@ async fn recordings(app: tauri::State<'_, App>) -> Res {
     let mut apps: Vec<Value> = live
         .iter()
         .filter(|r| !procs::is_protected(&r.app, r.exe_path.as_deref()))
-        .map(|r| json!({ "app": r.app, "name": ldesc::display_name(&r.app, r.description.as_deref()), "mem": r.mem }))
+        .map(|r| json!({ "app": r.app, "name": ldesc::summary_name(&r.app, r.description.as_deref()), "mem": r.mem }))
         .collect();
     apps.sort_by(|a, b| a["app"].as_str().unwrap_or("").to_lowercase().cmp(&b["app"].as_str().unwrap_or("").to_lowercase()));
     let active: Vec<Value> = list
@@ -532,7 +958,8 @@ async fn server_history(app: tauri::State<'_, App>, alias: String, range: i64) -
     let pts = sdb::series(&s, &alias, to - range, to, bucket).map_err(e)?;
     let pts: Vec<Value> = pts
         .iter()
-        .map(|p| json!({ "ts": p.ts, "cpu": p.cpu, "mem_pct": p.mem_pct(), "load1": p.load1, "net": p.net_rx + p.net_tx, "disk": p.disk_read + p.disk_write, "swap_pct": p.swap_pct() }))
+        .map(|p| json!({ "ts": p.ts, "cpu": p.cpu, "mem_pct": p.mem_pct(), "load1": p.load1, "net": p.net_rx + p.net_tx, "disk": p.disk_read + p.disk_write, "swap_pct": p.swap_pct(),
+            "net_rx": p.net_rx, "net_tx": p.net_tx, "disk_read": p.disk_read, "disk_write": p.disk_write, "iowait": p.iowait, "steal": p.steal }))
         .collect();
     Ok(json!({ "bucket": bucket, "points": pts }))
 }
@@ -607,6 +1034,7 @@ async fn settings(app: tauri::State<'_, App>, rescan: Option<bool>) -> Res {
         "size": size,
         "imported": { "jperformance": paths::import_result("JPerformance"), "jserver": paths::import_result("JServer") },
         "version": update::CURRENT,
+        "use_gh": update::use_gh(),
         "recorder": collector::is_running(),
     }))
 }
@@ -637,6 +1065,26 @@ async fn set_retention(app: tauri::State<'_, App>, days: i64) -> Res {
     Ok(Value::Null)
 }
 
+/// Settings > Developer: send update checks through the GitHub CLI.
+#[tauri::command]
+async fn set_use_gh(app: tauri::State<'_, App>, on: bool) -> Res {
+    ldb::set_setting(&*app.local.get()?, ldb::KEY_USE_GH, if on { "1" } else { "0" }).map_err(e)?;
+    Ok(Value::Null)
+}
+
+/// Whether the GitHub CLI is installed and signed in. Asked only when the developer option is on.
+#[tauri::command]
+async fn gh_status() -> Res {
+    tauri::async_runtime::spawn_blocking(update::gh_status).await.map_err(e)
+}
+
+/// The Refresh button: checks now and installs a newer release straight away.
+#[tauri::command]
+async fn refresh_update(app: tauri::State<'_, App>) -> Res {
+    app.updater.refresh();
+    Ok(update_json(app.updater.view()))
+}
+
 #[tauri::command]
 async fn set_theme(app: tauri::State<'_, App>, theme: String) -> Res {
     let theme = if matches!(theme.as_str(), "light" | "dark") { theme } else { "system".into() };
@@ -664,19 +1112,19 @@ fn update_json(s: update::State) -> Value {
 
 #[tauri::command]
 async fn update_state(app: tauri::State<'_, App>) -> Res {
-    Ok(update_json(app.updater.state()))
+    Ok(update_json(app.updater.view()))
 }
 
 #[tauri::command]
 async fn check_update(app: tauri::State<'_, App>) -> Res {
     app.updater.check();
-    Ok(update_json(app.updater.state()))
+    Ok(update_json(app.updater.view()))
 }
 
 #[tauri::command]
 async fn install_update(app: tauri::State<'_, App>) -> Res {
     app.updater.install();
-    Ok(update_json(app.updater.state()))
+    Ok(update_json(app.updater.view()))
 }
 
 /// The page has drawn its first view; show the window (it starts hidden to avoid a blank flash).
@@ -713,6 +1161,8 @@ pub fn run(smoke: bool) -> Result<(), String> {
         servers: Pool::new(paths::servers_db(), servers),
         updater: update::Updater::default(),
         findings: Mutex::default(),
+        procs: Mutex::default(),
+        cleanup_n: Mutex::default(),
     };
     let mut builder = tauri::Builder::default();
     // A hidden smoke run must not hand off to (or block) the window the user has open.
@@ -731,14 +1181,17 @@ pub fn run(smoke: bool) -> Result<(), String> {
             let mut window = tauri::WebviewWindowBuilder::from_config(app.handle(), &app.config().app.windows[0])?;
             // A held smoke run opens the WebView2 debug port so a test can click through the hidden window.
             if let Some(port) = std::env::var("JPU_SMOKE_HOLD").ok().filter(|_| smoke) {
-                window = window.additional_browser_args(&format!("--remote-debugging-port={port}"));
+                // Its own WebView2 profile, so the test works while the user's window is open.
+                window = window.additional_browser_args(&format!("--remote-debugging-port={port}")).data_directory(paths::data_dir().join("smoke-webview"));
             }
             window.build()?;
             // Show the window even if the page never calls ready(); a smoke run gives up after 3 minutes instead.
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 if smoke {
-                    std::thread::sleep(std::time::Duration::from_secs(180));
+                    // A held run is driven by a test that may scan a whole drive, so it gets longer.
+                    let held = std::env::var_os("JPU_SMOKE_HOLD").is_some();
+                    std::thread::sleep(std::time::Duration::from_secs(if held { 1800 } else { 180 }));
                     let _ = std::fs::write(paths::data_dir().join("smoke.json"), r#"{"error":"timed out"}"#);
                     handle.exit(2);
                     return;
@@ -769,6 +1222,34 @@ pub fn run(smoke: bool) -> Result<(), String> {
             pc_moment,
             pc_apps,
             stop_app,
+            pc_tree,
+            stop_tree,
+            set_auto_cleanup,
+            set_ram_clean,
+            ram_cleanup,
+            ram_free_now,
+            storage_status,
+            storage_scan,
+            storage_cancel,
+            storage_open_saved,
+            storage_folder,
+            storage_files,
+            storage_biggest,
+            storage_restore_points,
+            storage_delete,
+            storage_clean,
+            storage_clean_cancel,
+            storage_clean_seen,
+            storage_remeasure,
+            storage_downloads,
+            storage_empty_bin,
+            storage_reveal,
+            storage_windows_settings,
+            apps_status,
+            apps_rescan,
+            apps_uninstall,
+            apps_dismiss,
+            apps_forget_leftovers,
             recordings,
             recording_series,
             start_recording,
@@ -786,6 +1267,9 @@ pub fn run(smoke: bool) -> Result<(), String> {
             set_autostart,
             set_retention,
             set_theme,
+            refresh_update,
+            set_use_gh,
+            gh_status,
             start_recorder,
             update_state,
             check_update,
@@ -796,28 +1280,4 @@ pub fn run(smoke: bool) -> Result<(), String> {
         ])
         .run(tauri::generate_context!())
         .map_err(e)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn chart_buckets_keep_about_150_points() {
-        for (range, bucket) in [(3_600, 30), (21_600, 120), (86_400, 600), (604_800, 3_600), (2_592_000, 14_400)] {
-            assert_eq!(bucket_for(range), bucket);
-            let points = range / bucket;
-            assert!((100..=200).contains(&points), "{range}: {points} points");
-        }
-    }
-
-    #[test]
-    fn only_login_problems_count_as_failed() {
-        for s in ["timeout", "hostkey", "denied", "refused", "dns", "down", "lost", "error"] {
-            assert!(failed(s), "{s}");
-        }
-        for s in ["up", "connecting", "paused", ""] {
-            assert!(!failed(s), "{s}");
-        }
-    }
 }

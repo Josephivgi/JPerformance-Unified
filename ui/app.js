@@ -5,7 +5,7 @@ const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
 
 /* ================= Icons ================= */
 const I = {
-  logo: '<svg viewBox="0 0 24 24"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg>',
+  logo: '<span>JPU</span>',
   grid: '<path d="M2.5 2.5h4.5v4.5H2.5zM9 2.5h4.5v4.5H9zM2.5 9h4.5v4.5H2.5zM9 9h4.5v4.5H9z"/>',
   alert: '<path d="M8 1.8 14.6 13.5H1.4z"/><path d="M8 6.2v3.3M8 11.6v.1"/>',
   info: '<circle cx="8" cy="8" r="6.3"/><path d="M8 7.2v4M8 4.9v.1"/>',
@@ -22,19 +22,28 @@ const I = {
   search: '<circle cx="7" cy="7" r="4.6"/><path d="m10.5 10.5 3.3 3.3"/>',
   x: '<path d="m4 4 8 8M12 4l-8 8"/>',
   shield: '<path d="M8 1.8 13.2 3.8v4c0 3-2.2 5.3-5.2 6.4-3-1.1-5.2-3.4-5.2-6.4v-4z"/><path d="m5.8 8 1.6 1.6 2.9-3"/>',
+  broom: '<path d="M10.5 1.8 7.4 7.2"/><path d="M4.2 7.4h6.4l1.2 6.8H3z"/><path d="M6 10.2v4M8.4 10.2v4"/>',
+  ram: '<rect x="1.5" y="4.6" width="13" height="6.8" rx="1.2"/><path d="M4.6 2.4v2.2M8 2.4v2.2M11.4 2.4v2.2"/><path d="M4.5 7.4v1.4M7 7.4v1.4M9.5 7.4v1.4M12 7.4v1.4"/>',
   download: '<path d="M8 2.2v8M4.6 7l3.4 3.4L11.4 7M2.6 13.6h10.8"/>',
+  disk: '<rect x="1.8" y="4" width="12.4" height="8" rx="1.4"/><path d="M4.4 9.5h4M11.2 9.5h.1"/>',
+  folder: '<path d="M1.8 4.2c0-.7.5-1.2 1.2-1.2h3l1.4 1.6H13c.7 0 1.2.5 1.2 1.2v6.2c0 .7-.5 1.2-1.2 1.2H3c-.7 0-1.2-.5-1.2-1.2z"/>',
+  'arrow-up': '<path d="M8 13.5v-11M3.8 6.7 8 2.5l4.2 4.2"/>',
+  'sort-down': '<path d="M8 3v10M4.5 9.5 8 13l3.5-3.5"/>',
+  'sort-up': '<path d="M8 13V3M4.5 6.5 8 3l3.5 3.5"/>',
 };
 const ic = (n, cls = 'i') => `<svg class="${cls}" viewBox="0 0 16 16">${I[n]}</svg>`;
 
 /* ================= Formatting ================= */
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const pct = v => v == null || isNaN(v) ? '–' : v < 10 ? v.toFixed(1) + '%' : Math.round(v) + '%';
-function bytes(b) {
+// axis: drop a trailing ".0", so a chart axis reads "6 GB / 3 GB".
+function bytes(b, axis) {
   const u = ['B', 'KB', 'MB', 'GB', 'TB']; let v = Math.max(0, b || 0), i = 0;
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  return (i === 0 || v >= 100 ? Math.round(v) : v.toFixed(1)) + ' ' + u[i];
+  if (v >= 1023.5 && i < u.length - 1) { v /= 1024; i++; }
+  return (i === 0 || v >= 100 ? Math.round(v) : axis ? +v.toFixed(1) : v.toFixed(1)) + ' ' + u[i];
 }
-const rate = b => bytes(b) + '/s';
+const rate = (b, axis) => bytes(b, axis) + '/s';
 function ofBytes(a, b) {
   const x = bytes(a), y = bytes(b), ux = x.split(' ')[1];
   return ux === y.split(' ')[1] ? `${x.split(' ')[0]} of ${y}` : `${x} of ${y}`;
@@ -75,12 +84,18 @@ const RANGES = [[3600, 'Hour'], [21600, '6 h'], [86400, 'Day'], [604800, 'Week']
 const S = {
   page: 'overview', machine: null, tab: 'now', range: 86400, sort: 'cpu', appSel: null,
   histApp: '', pinned: null, filter: 'all', srvKind: 'all', recSel: null, recMinutes: 30,
-  asked: new Set(), side: null, update: { state: 'idle' }, theme: 'system',
+  asked: new Map(), side: null, update: { state: 'idle' }, theme: 'system',
+  cleanSel: new Set(), cleanSeen: new Set(), openGroups: new Set(), showAll: new Set(), runQuery: '',
+  stSel: new Map(), stJunk: new Set(), apQ: '', apAll: false, stView: 'biggest', stBSort: 'size', stBDesc: true, stBN: 200, stDir: 0, stSort: 'size', stDesc: true, stFSort: 'size', stFDesc: true, stType: '', stFQ: '', stFN: 200, stRoot: null, stPerm: false, stDupN: 100,
+  stJunkOpen: new Set(), stJunkAll: new Set(), stCleanMsg: null, stDlDays: 90, stDlN: 50, stDlLast: null, stBuildDays: 30,
+  ramBusy: false,
 };
+const key2 = (pid, started) => pid + ':' + started;
+const SEARCH_IDS = ['runq', 'apq', 'stfq'];
 let renderGen = 0;
 
 function go(page, machine, tab) {
-  S.page = page; S.machine = machine || null; S.pinned = null; S.recSel = null;
+  S.page = page; S.machine = machine || null; S.pinned = null; S.recSel = null; S.stPerm = false;
   S.tab = tab || (machine === 'pc' ? 'now' : 'summary');
   S.sort = machine && machine !== 'pc' ? 'mem' : 'cpu';
   if (S.side) renderSide();
@@ -89,7 +104,12 @@ function go(page, machine, tab) {
 
 /* ================= Small pieces ================= */
 const meterCls = p => p >= 95 ? 'crit' : p >= 85 ? 'warn' : '';
+// meter: a reading against real capacity, so it turns amber and red near full.
 const meter = (p, thin) => `<div class="meter ${thin ? 'thin' : ''} ${meterCls(p)}"><i style="width:${Math.max(1.5, Math.min(100, p || 0))}%"></i></div>`;
+// bar: a size compared with the biggest row, or progress. Never colored as a warning.
+const bar = p => `<div class="meter thin rel"><i style="width:${Math.max(1.5, Math.min(100, p || 0))}%"></i></div>`;
+// Sidebar reading: the number, colored only when it is high.
+const mini = (k, p) => `<span class="mini">${k} <b class="num ${meterCls(p)}">${pct(p)}</b></span>`;
 const statusText = s => s.failed ? `<span class="status crit">${ic('crit')}${esc(s.label || s.server?.label)}</span>`
   : !s.enabled && s.enabled !== undefined ? '<span class="status">Paused</span>'
   : (s.status || s.server?.status) === 'connecting' ? '<span class="status">Connecting</span>' : '';
@@ -118,69 +138,117 @@ function head(title, sub, actions = '', tabs = null) {
 
 const LEVEL_TEXT = { crit: 'Needs you', warn: 'Worth a look', info: 'For your information' };
 const findingRow = f => `<div class="finding ${f.level}">${ic(f.level === 'crit' ? 'crit' : f.level === 'warn' ? 'alert' : 'info', 'i fi')}
-  <div><div class="t">${esc(f.title)}</div><div class="d">${esc(f.detail)}</div>
-  <div class="m"><span class="kind">${ic(f.machine_id === 'pc' ? 'pc' : 'server')}${esc(f.machine)}</span><span>${LEVEL_TEXT[f.level]}</span>${f.retry ? `<button class="btn small" data-retry="${esc(f.machine_id)}">${ic('refresh')}Retry now</button>` : ''}</div></div>
+  <div><div class="t">${esc(f.title)}</div><div class="d">${esc(f.detail)}</div>${f.action ? `<div class="act"><b>What to do:</b> ${esc(f.action)}</div>` : ''}${f.commands?.length ? `<pre class="cmds" title="Read-only commands to run on the server">${esc(f.commands.join(String.fromCharCode(10)))}</pre>` : ''}
+  <div class="m"><span class="kind">${ic(f.machine_id === 'pc' ? 'pc' : 'server')}${esc(f.machine)}</span>${f.level === 'info' ? '' : `<span>${LEVEL_TEXT[f.level]}</span>`}${f.retry ? `<button class="btn small" data-retry="${esc(f.machine_id)}">${ic('refresh')}Retry now</button>` : ''}${f.running ? stopBtn(f.running, true) : ''}</div></div>
   <span class="when">${when(f.at)}</span></div>`;
+// Problems first; plain statistics under their own heading so they do not read as alarms.
+function findingList(list, empty) {
+  if (!list.length) return `<div class="findings"><div class="empty">${empty}</div></div>`;
+  const attn = list.filter(f => f.level !== 'info'), info = list.filter(f => f.level === 'info');
+  return `<div class="findings">${attn.map(findingRow).join('')}</div>${info.length ? `<div class="findings-sub">For your information</div><div class="findings">${info.map(findingRow).join('')}</div>` : ''}`;
+}
 
 /* ================= Line charts ================= */
 // A chart is [ts, value|null] points from `from` to `to`. Gaps longer than 2.5 buckets break the line.
 const CHARTS = [];
-function lineChart({ id, title, pts, from, to, bucket, max, fmt, h = 120, group, tip }) {
-  CHARTS.push({ id, title, pts, from, to, bucket, max, fmt, h, group, tip });
-  const vals = pts.map(p => p[1]).filter(v => v != null);
+// An app gap can mean it was closed or that nothing was recorded, so it does not claim which.
+const gapApp = 'No data';
+// gapLabel names what an empty stretch means on this chart ("Not recording", "Not running").
+function lineChart({ id, title, pts, from, to, bucket, max, fmt, h = 120, group, tip, gapLabel = 'No data', whole }) {
+  CHARTS.push({ id, title, pts, from, to, bucket, max, fmt, h, group, tip, gapLabel, whole });
+  const real = pts.filter(p => p[1] != null);
+  const vals = real.map(p => p[1]);
   const cur = vals.length ? vals[vals.length - 1] : null, peak = vals.length ? Math.max(...vals) : null;
+  // An old last sample says when it was taken instead of passing as the current value.
+  const lastTs = real.length ? real[real.length - 1][0] : 0;
+  const stale = lastTs && to - lastTs > Math.max(bucket * 2.5, 15);
   return `<div class="chart" data-chart="${id}">
-    <div class="chart-top"><b>${title}</b><span class="v">${vals.length ? `latest ${fmt(cur)} · peak ${fmt(peak)}` : 'No samples in this range'}</span></div>
+    <div class="chart-top"><b>${title}</b><span class="v">${vals.length ? `${stale ? `last ${fmt(cur)}, ${whenLow(lastTs)}` : `latest ${fmt(cur)}`} · ${bucket <= 1 ? 'peak' : 'highest average'} ${fmt(peak)}` : 'No samples in this range'}</span></div>
     <div class="plot"><div class="yax" id="${id}-y" style="height:${h}px"></div><div class="canvas" id="${id}-c" style="height:${h}px"></div><div class="xax" id="${id}-x"></div></div>
   </div>`;
 }
-function niceMax(v) { const p = Math.pow(10, Math.floor(Math.log10(v || 1))); for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v * 1.1) return m * p; return 10 * p; }
+function niceMax(v) { const p = Math.pow(10, Math.floor(Math.log10(v || 1))); for (const m of [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]) if (m * p >= v * 1.1) return m * p; return 10 * p; }
 function chartGeom(c, W) {
   const vals = c.pts.map(p => p[1]).filter(v => v != null);
-  const max = c.max || niceMax(vals.length ? Math.max(...vals) : 1);
+  const top = vals.length ? Math.max(...vals) : 1;
+  // Bytes are shown in 1024 steps, so round their axis in those units (5 GB, not 5.6 GB).
+  // Ticks are then labelled in that one unit ("0.75 GB", not "768 MB").
+  const sized = c.fmt === bytes || c.fmt === rate;
+  let k = sized && top >= 1024 ? 1024 ** Math.min(4, Math.floor(Math.log(top) / Math.log(1024))) : 1;
+  if (sized && k < 1024 ** 4 && niceMax(top / k) >= 1024) k *= 1024;
+  let max = c.max || niceMax(top / k) * k;
+  // Counts (processes) need whole-number ticks: an even maximum keeps the midpoint whole too.
+  if (c.whole && !c.max) max = Math.max(2, Math.ceil(max / 2) * 2);
+  const unit = sized ? ['B', 'KB', 'MB', 'GB', 'TB'][Math.round(Math.log(k) / Math.log(1024))] + (c.fmt === rate ? '/s' : '') : '';
   const span = Math.max(1, c.to - c.from);
-  return { max, x: ts => ((ts - c.from) / span) * W, y: v => c.h - (Math.min(v, max) / max) * c.h };
+  return { max, k, unit, x: ts => ((ts - c.from) / span) * W, y: v => c.h - (Math.min(v, max) / max) * c.h };
 }
 function drawCharts() {
   for (const c of CHARTS) {
     const el = document.getElementById(c.id + '-c'); if (!el) continue;
     const W = el.clientWidth, H = c.h;
     if (!W) continue;
-    const { max, x, y } = chartGeom(c, W);
+    const { max, k, unit, x, y } = chartGeom(c, W);
     const gap = Math.max(c.bucket * 2.5, 15);
     // One line with breaks at gaps; each unbroken run gets its own area wash.
     let d = '', area = '', run = '', first = null, prev = null;
+    // A sample stands for its whole bucket, so a band starts where the last bucket with readings ends.
+    const gaps = [];
     const close = () => { if (first) area += `${run}L${x(prev[0]).toFixed(1)} ${H}L${x(first[0]).toFixed(1)} ${H}Z`; };
     for (const p of c.pts) {
       if (p[1] == null) continue;
       const xy = x(p[0]).toFixed(1) + ' ' + y(p[1]).toFixed(1);
-      if (!prev || p[0] - prev[0] > gap) { close(); first = p; run = 'M' + xy; d += 'M' + xy; }
+      if (!prev || p[0] - prev[0] > gap) { gaps.push([prev ? prev[0] + c.bucket : c.from, p[0]]); close(); first = p; run = 'M' + xy; d += 'M' + xy; }
       else { run += 'L' + xy; d += 'L' + xy; }
       prev = p;
     }
     close();
+    if (!prev) gaps.push([c.from, c.to]);
+    else if (c.to - prev[0] > gap) gaps.push([prev[0] + c.bucket, c.to]);
+    // Empty stretches get a quiet band; the widest one, when there is room, says why.
+    const real = gaps.filter(([a, b]) => b - a > gap - c.bucket);
+    const widest = real.reduce((m, g) => (g[1] - g[0] > (m ? m[1] - m[0] : 0) ? g : m), null);
+    const bands = real.map(g => {
+      const [a, b] = g, x0 = x(a), w = x(b) - x0;
+      if (w < 3) return '';
+      return `<rect class="gap" x="${x0.toFixed(1)}" y="0" width="${w.toFixed(1)}" height="${H}"/>${g === widest && w > 90 ? `<text class="gap-t" x="${(x0 + w / 2).toFixed(1)}" y="${(H / 2 + 4).toFixed(1)}" text-anchor="middle">${esc(c.gapLabel)}</text>` : ''}`;
+    }).join('');
     const ticks = [0, max / 2, max];
     const pinX = S.pinned != null && S.pinned >= c.from && S.pinned <= c.to ? x(S.pinned) : null;
     el.innerHTML = `<svg width="${W}" height="${H}" role="img" aria-label="${esc(c.title)} chart">
+      ${bands}
       ${ticks.map(t => `<line x1="0" x2="${W}" y1="${y(t)}" y2="${y(t)}" stroke="${t === 0 ? 'var(--axis)' : 'var(--grid)'}" stroke-width="1"/>`).join('')}
       <path d="${area}" fill="var(--s1)" opacity=".1"/>
       <path d="${d}" fill="none" stroke="var(--s1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
       <g class="hover" style="display:none"><line y1="0" y2="${H}" stroke="var(--ink-2)" stroke-width="1"/><circle r="4.5" fill="var(--s1)" stroke="var(--surface)" stroke-width="2"/></g>
       ${pinX != null ? `<line x1="${pinX}" x2="${pinX}" y1="0" y2="${H}" stroke="var(--accent)" stroke-width="2"/>` : ''}
     </svg>`;
-    document.getElementById(c.id + '-y').innerHTML = ticks.map(t => `<span style="top:${y(t)}px">${c.fmt(t, true)}</span>`).join('');
+    document.getElementById(c.id + '-y').innerHTML = ticks.map(t => `<span style="top:${y(t)}px">${unit ? +(t / k).toFixed(2) + ' ' + unit : c.fmt(t, true)}</span>`).join('');
     const span = c.to - c.from;
     document.getElementById(c.id + '-x').innerHTML = [0, 1, 2, 3, 4].map(k => { const ts = c.from + span * k / 4; return `<span style="left:${x(ts)}px">${axisLabel(ts, span)}</span>`; }).join('');
     const at = e => nearest(c, c.from + ((e.clientX - el.getBoundingClientRect().left) / W) * span);
-    el.onmousemove = e => { S.hovering = true; const p = at(e); if (p) hoverAt(c, p[0]); };
+    el.onmousemove = e => { S.hovering = true; const p = at(e); if (p) hoverAt(c, p[0]); else clearHover(c.group); };
     el.onmouseleave = () => { S.hovering = false; clearHover(c.group); };
-    el.onclick = e => { const p = at(e); if (p && c.group) { S.pinned = p[0]; render(); } };
+    el.onclick = e => { const p = at(e); if (p && PIN_GROUPS.has(c.group)) { S.pinned = p[0]; render(); } };
   }
 }
+// Chart groups whose page shows a panel for a kept moment (PC and server History).
+const PIN_GROUPS = new Set(['h', 's']);
+// The sample nearest to ts, or null inside an empty stretch, so hover never shows a reading from far away.
 function nearest(c, ts) {
-  let best = null, bd = Infinity;
-  for (const p of c.pts) { if (p[1] == null) continue; const dd = Math.abs(p[0] - ts); if (dd < bd) { bd = dd; best = p; } }
-  return best;
+  const gap = Math.max(c.bucket * 2.5, 15);
+  let before = null, after = null;
+  for (const p of c.pts) { if (p[1] == null) continue; if (p[0] <= ts) before = p; else { after = p; break; } }
+  // Inside a shaded band (same rules as drawCharts) there is no reading to show.
+  if (before && after && after[0] - before[0] > gap && ts > before[0] + c.bucket && ts < after[0]) return null;
+  if (!before && after && after[0] - c.from > gap - c.bucket && ts < after[0]) return null;
+  if (before && !after && c.to - before[0] > gap && ts > before[0] + c.bucket) return null;
+  // A sample right under the pointer always wins, even at the edge of a gap.
+  const near = c.bucket * 0.75 + 2;
+  const closer = !before ? after : !after ? before : ts - before[0] <= after[0] - ts ? before : after;
+  if (closer && Math.abs(closer[0] - ts) <= near) return closer;
+  if (!before || !after || after[0] - before[0] > gap) return null;
+  return ts - before[0] <= after[0] - ts ? before : after;
 }
 let tipReq = 0;
 function hoverAt(c, ts) {
@@ -198,7 +266,7 @@ function hoverAt(c, ts) {
     if (o === c) {
       if (!tip) { tip = document.createElement('div'); tip.className = 'tip'; el.appendChild(tip); }
       const extraId = 'tx-' + o.id;
-      const html = `<div class="tt">${tipTime(p[0], o.bucket)}</div><div class="tv">${o.fmt(p[1])}</div><div id="${extraId}"></div>${o.group ? '<div class="th">Click to keep this moment open</div>' : ''}`;
+      const html = `<div class="tt">${tipTime(p[0], o.bucket)}</div><div class="tv">${o.fmt(p[1])}</div><div id="${extraId}"></div>${PIN_GROUPS.has(o.group) ? '<div class="th">Click to keep this moment open</div>' : ''}`;
       if (tip.dataset.ts !== String(p[0])) {
         tip.dataset.ts = p[0]; tip.innerHTML = html;
         if (o.tip) {
@@ -240,18 +308,20 @@ function renderSide() {
   const servers = sd.ssh ? sd.servers : [];
   const online = servers.filter(s => s.enabled && !s.failed && s.status === 'up').length;
   const watchedN = servers.filter(s => s.enabled).length;
-  const pcRow = `<button class="nav machine-nav" ${cur('machine', 'pc')} data-go="machine" data-m="pc">
+  // Clean up and Storage have their own sidebar entries, so the PC row is current only on its other tabs.
+  const pcCur = S.page === 'machine' && S.machine === 'pc' && S.tab !== 'cleanup' && S.tab !== 'storage' ? 'aria-current="page"' : '';
+  const pcRow = `<button class="nav machine-nav" ${pcCur} data-go="machine" data-m="pc">
       <span class="row1"><span class="name">${esc(sd.pc.name)}</span></span>
-      <span class="minis"><span class="mini">CPU ${meter(sd.pc.cpu, true)}</span><span class="mini">Mem ${meter(sd.pc.mem_pct, true)}</span></span></button>`;
+      <span class="minis">${mini('CPU', sd.pc.cpu)}${mini('Mem', sd.pc.mem_pct)}</span></button>`;
   const srvRow = s => `<button class="nav machine-nav" ${cur('machine', s.alias)} data-go="machine" data-m="${esc(s.alias)}">
       <span class="row1"><span class="name">${esc(s.alias)}</span></span>
       ${s.failed ? `<span class="why">${ic('crit')}${esc(s.label)} · ${ago(s.checked_at)}</span>`
         : !s.enabled ? '<span class="why" style="color:var(--muted)">Paused</span>'
         : s.cpu == null ? '<span class="why" style="color:var(--muted)">Connecting</span>'
-        : `<span class="minis"><span class="mini">CPU ${meter(s.cpu, true)}</span><span class="mini">Mem ${meter(s.mem_pct, true)}</span></span>`}
+        : `<span class="minis">${mini('CPU', s.cpu)}${mini('Mem', s.mem_pct)}</span>`}
     </button>`;
   const u = S.update;
-  const upd = u.state === 'available' ? `<div class="update">${ic('download')}<span class="grow">Version ${esc(u.version)} is ready</span><button class="btn small" data-dialog="update">What's new</button></div>`
+  const upd = u.state === 'available' ? `<div class="update">${ic('download')}<span class="grow">Version ${esc(u.version)} is ready</span><button class="btn small" data-dialog="update">What's new</button><button class="btn primary small" data-dialog="update">${ic('download')}Update now</button></div>`
     : u.state === 'downloading' ? `<div class="update">${ic('download')}<span class="grow">Downloading ${u.total ? Math.round(u.done / u.total * 100) + '%' : ''}</span></div>`
     : u.state === 'restarting' ? `<div class="update">${ic('refresh')}<span class="grow">Restarting to finish the update</span></div>` : '';
   const recLine = sd.recorder
@@ -264,6 +334,9 @@ function renderSide() {
       <button class="nav" ${cur('findings')} data-go="findings">${ic('alert')}Findings${S.attn != null ? `<span class="count ${S.attn ? 'attn' : ''}">${S.attn}</span>` : ''}</button>
       <div class="side-label"><span>This PC</span></div>
       ${pcRow}
+      <button class="nav" ${S.page === 'machine' && S.machine === 'pc' && S.tab === 'cleanup' ? 'aria-current="page"' : ''} data-go="machine" data-m="pc" data-t="cleanup">${ic('broom')}Clean up${sd.cleanup_n ? `<span class="count">${sd.cleanup_n}</span>` : ''}</button>
+      <button class="nav" ${cur('ram')} data-go="ram">${ic('ram')}RAM Auto Cleanup${sd.leaks ? `<span class="count attn">${sd.leaks}</span>` : ''}</button>
+      <button class="nav" ${S.page === 'machine' && S.machine === 'pc' && S.tab === 'storage' ? 'aria-current="page"' : ''} data-go="machine" data-m="pc" data-t="storage">${ic('disk')}Storage</button>
       <div class="side-label"><span>Servers</span><span>${sd.ssh ? (watchedN ? `${online} of ${watchedN} online` : 'None picked') : 'Off'}</span></div>
       ${sd.ssh ? servers.map(srvRow).join('') + `<button class="nav" ${cur('keys')} data-go="keys">${ic('key')}SSH keys</button>`
         : `<button class="nav" data-go="settings">${ic('server')}Add servers over SSH</button>`}
@@ -279,27 +352,27 @@ async function pageOverview() {
   const d = await invoke('overview');
   const pc = d.pc, servers = d.servers;
   const attn = d.findings.filter(f => f.level !== 'info');
-  S.attn = attn.length;
+  if (S.page === 'overview') S.attn = attn.length;
   const pcLatest = pc.latest?.point;
   const memTotal = pc.latest?.mem_total || 0;
   const disk = pc.disks[0];
   const watchedS = servers.filter(s => s.server.enabled);
   const okS = watchedS.filter(s => !s.failed && s.latest);
   const n = 1 + watchedS.length;
-  const pcRow = `<tr data-go="machine" data-m="pc">
+  const pcRow = `<tr tabindex="0" data-go="machine" data-m="pc">
       <td><div class="mname"><b>${esc(pc.host.name)}</b><span class="line2"><span class="kind">${ic('pc')}This PC</span></span></div></td>
       <td><div class="cellv"><div class="top"><b class="num">${pct(pcLatest?.cpu)}</b><span>${pc.host.cores} threads</span></div>${spark(pc.cpu_hour.map(p => p[1]), 100)}</div></td>
       <td><div class="cellv"><div class="top"><b class="num">${pct(pcLatest?.mem_pct)}</b><span>${ofBytes(pcLatest?.mem_used, memTotal)}</span></div>${meter(pcLatest?.mem_pct)}</div></td>
       <td><div class="cellv">${disk ? `<div class="top"><b class="num">${Math.round(disk.pct)}%</b><span>${esc(disk.mount)} ${bytes(disk.free)} free</span></div>${meter(disk.pct)}` : '<span class="muted">–</span>'}</div></td>
       <td><div class="cellv"><div class="top"><span>in</span><b class="num">${rate(pc.net_in)}</b></div><div class="top"><span>out</span><b class="num">${rate(pc.net_out)}</b></div></div></td>
-      <td><div class="cellv">${pc.top_mem ? `<span class="ell" title="${esc(pc.top_mem.app)}">${esc(pc.top_mem.app)}</span><span class="muted num" style="font-size:11.5px">${bytes(pc.top_mem.mem)} of memory</span>` : '<span class="muted">–</span>'}</div></td></tr>`;
+      <td><div class="cellv">${pc.top_mem ? `<span class="ell" title="${esc(pc.top_mem.app)}">${esc(friendly(pc.top_mem))}</span><span class="muted num" style="font-size:11.5px">${bytes(pc.top_mem.mem)} of memory</span>` : '<span class="muted">–</span>'}</div></td></tr>`;
   const srvRow = s => {
     const name = `<td><div class="mname"><b>${esc(s.alias)}</b><span class="line2"><span class="kind">${ic('server')}Server</span>${statusText(s.server.enabled ? s : { enabled: false })}</span>${s.via ? `<span class="line2"><span class="chip">via ${esc(s.via)}</span></span>` : ''}</div></td>`;
-    if (!s.server.enabled) return `<tr data-go="machine" data-m="${esc(s.alias)}">${name}<td colspan="4"><span class="muted">Not being watched. Its history is kept.</span></td><td><button class="btn small" data-watch="${esc(s.alias)}" data-on="1">${ic('play')}Resume</button></td></tr>`;
-    if (s.failed) return `<tr data-go="machine" data-m="${esc(s.alias)}">${name}<td colspan="4"><div class="offline-cell">${esc(s.hint || s.server.detail)} Last checked ${ago(s.server.checked_at)}.</div></td><td><button class="btn small" data-retry="${esc(s.alias)}">${ic('refresh')}Retry now</button></td></tr>`;
+    if (!s.server.enabled) return `<tr tabindex="0" data-go="machine" data-m="${esc(s.alias)}">${name}<td colspan="4"><span class="muted">Not being watched. Its history is kept.</span></td><td><button class="btn small" data-watch="${esc(s.alias)}" data-on="1">${ic('play')}Resume</button></td></tr>`;
+    if (s.failed) return `<tr tabindex="0" data-go="machine" data-m="${esc(s.alias)}">${name}<td colspan="4"><div class="offline-cell">${esc(s.hint || s.server.detail)}<div class="muted">Last checked ${ago(s.server.checked_at)}.</div></div></td><td><button class="btn small" data-retry="${esc(s.alias)}">${ic('refresh')}Retry now</button></td></tr>`;
     const p = s.latest?.point;
-    if (!p) return `<tr data-go="machine" data-m="${esc(s.alias)}">${name}<td colspan="5"><span class="muted">Logging in. The first readings show up within a few seconds.</span></td></tr>`;
-    return `<tr data-go="machine" data-m="${esc(s.alias)}">${name}
+    if (!p) return `<tr tabindex="0" data-go="machine" data-m="${esc(s.alias)}">${name}<td colspan="5"><span class="muted">Logging in. The first readings show up within a few seconds.</span></td></tr>`;
+    return `<tr tabindex="0" data-go="machine" data-m="${esc(s.alias)}">${name}
       <td><div class="cellv"><div class="top"><b class="num">${pct(p.cpu)}</b><span>${s.server.cores} cores</span></div>${spark(s.cpu_hour.map(q => q[1]), 100)}</div></td>
       <td><div class="cellv"><div class="top"><b class="num">${pct(s.latest.mem_pct)}</b><span>${ofBytes(s.latest.mem_used, p.mem_total)}</span></div>${meter(s.latest.mem_pct)}</div></td>
       <td><div class="cellv">${s.fullest ? `<div class="top"><b class="num">${Math.round(s.fullest.pct)}%</b><span>${esc(s.fullest.mount)} ${bytes(s.fullest.avail)} free</span></div>${meter(s.fullest.pct)}` : '<span class="muted">–</span>'}</div></td>
@@ -312,15 +385,16 @@ async function pageOverview() {
   const disks = [...(disk ? [{ pct: disk.pct, where: `${disk.mount} on ${pc.host.name}`, free: disk.free }] : []), ...okS.filter(s => s.fullest).map(s => ({ pct: s.fullest.pct, where: `${s.fullest.mount} on ${s.alias}`, free: s.fullest.avail }))];
   const fullest = disks.length ? disks.reduce((a, b) => b.pct > a.pct ? b : a) : null;
   const down = watchedS.filter(s => s.failed);
+  const upN = watchedS.filter(s => !s.failed && s.latest && s.server.status === 'up').length;
   const first = n === 1
     ? `<div><div class="k">Recording</div><div class="v">${d.recorder ? 'On' : 'Off'}</div><div class="d">${d.recorder ? 'Every 5 s, even with this window closed' : 'Start it from the sidebar'}</div></div>`
-    : `<div><div class="k">Online</div><div class="v ${down.length ? 'crit' : ''}">${n - down.length} of ${n}</div><div class="d">${down.length ? `${esc(down[0].alias)} is not answering` : 'Everything answers'}</div></div>`;
+    : `<div><div class="k">Online</div><div class="v ${down.length ? 'crit' : ''}">${upN + 1} of ${n}</div><div class="d">${down.length ? `${esc(down[0].alias)} is not answering` : (upN + 1 < n ? 'Some are still connecting' : 'Everything answers')}</div></div>`;
   return head('Overview', `<span>${n === 1 ? 'This PC' : `This PC and ${n - 1} server${n === 2 ? '' : 's'}`}</span><span>Updated ${hm(new Date())}</span>`, `<button class="btn" data-action="refresh">${ic('refresh')}Refresh</button>`) + `
   <div class="body">
     <div class="summary">
       ${first}
       <div><div class="k">Needs attention</div><div class="v ${attn.some(f => f.level === 'crit') ? 'crit' : ''}">${attn.length}</div><div class="d">${attn[0] ? esc(attn[0].title) : 'Nothing right now'}</div></div>
-      <div><div class="k">Busiest right now</div><div class="v" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(busiest.name)}</div><div class="d">${pct(busiest.cpu)} CPU${busiest.why ? ', ' + esc(busiest.why) : ''}</div></div>
+      <div><div class="k">Busiest right now</div><div class="v" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(busiest.name)}">${esc(busiest.name)}</div><div class="d">${pct(busiest.cpu)} CPU${busiest.why ? ', ' + esc(busiest.why) : ''}</div></div>
       <div><div class="k">Fullest disk</div><div class="v">${fullest ? Math.round(fullest.pct) + '%' : '–'}</div><div class="d">${fullest ? `${esc(fullest.where)}, ${bytes(fullest.free)} free` : ''}</div></div>
     </div>
     <section class="panel fleet" aria-label="Machines">
@@ -330,7 +404,7 @@ async function pageOverview() {
     ${d.ssh ? '' : `<div class="add-servers"><div class="ic">${ic('server')}</div><div><h3>See your servers here too</h3><p>JPerformance can log in to the Linux servers in your SSH config and record them the same way it records this PC. It only reads, and installs nothing on them. This is off until you turn it on.</p></div><button class="btn primary" data-go="settings">${ic('search')}Find my servers</button></div>`}
     <section class="panel">
       <div class="panel-head"><h2>Latest findings</h2><span class="hint">Last 24 hours</span><span class="grow"></span><button class="btn small ghost" data-go="findings">See all ${d.findings.length}</button></div>
-      <div class="findings" style="margin-top:8px">${d.findings.length ? d.findings.slice(0, 4).map(findingRow).join('') : '<div class="empty">Nothing found. Everything looks fine.</div>'}</div>
+      <div style="margin-top:8px">${findingList(d.findings.slice(0, 4), 'Nothing found. Everything looks fine.')}</div>
     </section>
   </div>`;
 }
@@ -341,23 +415,94 @@ async function pageFindings() {
   const machines = [...new Map(list.map(f => [f.machine_id, f.machine])).entries()];
   if (S.filter !== 'all' && !machines.some(([id]) => id === S.filter)) machines.push([S.filter, S.filter === 'pc' ? 'This PC' : S.filter]);
   const shown = list.filter(f => S.filter === 'all' || f.machine_id === S.filter);
-  if (S.range === 86400) S.attn = list.filter(f => f.level !== 'info').length;
+  if (S.range === 86400 && S.page === 'findings') S.attn = list.filter(f => f.level !== 'info').length;
   return head('Findings', 'Plain explanations of what slowed a machine down, when, and why. Worst first.') + `
   <div class="body">
     <div class="toolbar"><span class="lbl">Machine</span><select class="select" id="ffilter"><option value="all">All machines</option>${machines.map(([id, name]) => `<option value="${esc(id)}" ${S.filter === id ? 'selected' : ''}>${esc(name)}</option>`).join('')}</select>
       <span class="grow"></span>${rangePicker()}</div>
-    <section class="panel"><div class="findings">${shown.length ? shown.map(findingRow).join('') : '<div class="empty">Nothing found in this range.</div>'}</div></section>
+    <section class="panel">${findingList(shown, 'Nothing found in this range.')}</section>
   </div>`;
 }
 
+/* ================= RAM Auto Cleanup ================= */
+// What the RAM cleaner did, and the apps whose memory keeps coming back: memory leaks.
+async function pageRamCleanup() {
+  const d = await invoke('ram_cleanup');
+  const runs = d.runs || [], leaks = d.leaks || [];
+  const open = leaks.filter(l => !l.resolved).sort((a, b) => b.rate - a.rate);
+  const gone = leaks.filter(l => l.resolved).sort((a, b) => b.rate - a.rate);
+  const goneShown = S.showAll.has('ramgone') ? gone : gone.slice(0, 10);
+  const total = d.total || { freed: 0, passes: 0, last: null };
+  const byApp = d.by_app || [];
+  const appN = new Set(byApp.map(a => a.app)).size;
+  const reach = d.mem_pct >= d.level;
+  const worst = open[0];
+  // When the detector last ran, not when a leak last grew: the list can be minutes old or hours.
+  const looked = d.checked || Math.max(0, ...leaks.map(l => l.last_ts || 0)) || null;
+  const before = r => r.mem_total ? pct(100 * r.mem_used / r.mem_total) : '–';
+  const runRow = r => {
+    // Memory in use is read again right after a pass, but the PC carries on using it, so it is only worth
+    // showing when it clearly fell. What moved out of RAM is exact: it is measured per process.
+    const drop = r.mem_used - (r.mem_after || 0) > r.mem_total * 0.01;
+    const names = (r.items || []).map(i => `${esc(stem(i.app))} ${bytes(i.mem)}`);
+    const what = names.length ? names.slice(0, 3).join(', ') + (names.length > 3 ? ` and ${names.length - 3} more` : '') : `${r.apps} app${r.apps === 1 ? '' : 's'}`;
+    return `<tr><td><b style="font-weight:600">${when(r.ts)}</b><span class="sub">${r.auto ? 'On its own' : 'You asked for it'}</span></td>
+      <td class="wrap">${what}</td>
+      <td class="r num">${before(r)}<span class="sub">${r.mem_total ? `${bytes(r.mem_used)}${drop ? `, ${bytes(r.mem_after)} after` : ''}` : 'not recorded'}</span></td>
+      <td class="r num opt">${r.procs}</td><td><div class="barcell"><b>${bytes(r.freed)}</b>${bar(r.freed / Math.max(1, ...runs.map(x => x.freed)) * 100)}</div></td></tr>`;
+  };
+  const leakRow = l => {
+    // Each line is drawn against its own climb, so a slow leak is not flattened by a big one.
+    const climb = (l.series || []).map(p => p[1]);
+    const peak = Math.max(1, ...climb, l.peak_mem);
+    const shape = `${bytes(l.from_mem)} to ${bytes(l.peak_mem)} over ${dur(l.hours * 3600)}`;
+    return `<tr ${l.resolved ? 'style="opacity:.72"' : ''}><td class="fill wrap"><b style="font-weight:600">${esc(l.name)}</b><span class="sub">${l.resolved ? `<span class="chip">Stopped ${ago(l.gone_ts)}</span> ` : ''}${esc(l.app)}${l.resolved ? '' : ` · since ${when(l.first_ts)}`}</span></td>
+      <td class="sparkcell" role="img" title="${esc(shape)}" aria-label="${esc(shape)}">${spark(climb, peak, 28)}</td>
+      <td class="r num">+${bytes(l.peak_mem - l.from_mem)}<span class="sub">from ${bytes(l.from_mem)} to ${bytes(l.peak_mem)}</span></td>
+      <td class="r num">${bytes(l.rate)}/h<span class="sub">for ${dur(l.hours * 3600)}</span></td>
+      <td class="r num opt">${pct(l.cpu)}<span class="sub">CPU</span></td>
+      <td class="r opt2">${l.freed ? `${bytes(l.freed)}<span class="sub">${ago(l.freed_at)}</span>` : '<span class="muted">–</span>'}</td></tr>`;
+  };
+  const gap = S.side?.recorder ? '' : `<div class="notice">${ic('alert', 'i fi')}<div><b>The recorder is not running.</b> Nothing new is being measured, so everything below is as it was when it stopped. Start it from the sidebar.</div></div>`;
+  // A pass only happens while the cleaner is on, so the header says what it would do when it is off.
+  const state = d.on ? `Frees idle apps' memory when RAM reaches ${d.level}%` : `Turned off. Turn it on in Clean up to free idle apps' memory at ${d.level}%`;
+  return head('RAM Auto Cleanup', `<span>${d.on ? 'On' : 'Off'}</span><span>${state}</span><span>Looks for leaks in the last day</span>`, `<button class="btn" data-go="machine" data-m="pc" data-t="cleanup">${ic('broom')}Clean-up settings</button><button class="btn primary" data-action="ram-free" ${S.ramBusy ? 'disabled' : ''} title="Runs one pass now. Nothing is closed.">${ic('ram')}${S.ramBusy ? 'Freeing…' : 'Free RAM now'}</button>`) + `
+  <div class="body">
+    ${gap}
+    <div class="summary">
+      <div><div class="k">Memory in use</div><div class="v ${d.mem_pct >= 90 ? 'crit' : ''}">${d.mem_total ? pct(d.mem_pct) : '–'}</div><div class="d">${d.mem_total ? ofBytes(d.mem_used, d.mem_total) : 'No reading yet'}${!d.mem_total ? '' : !d.on ? ', cleaner off' : reach ? ', so idle apps are freed' : `, under the ${d.level}% level`}</div></div>
+      <div><div class="k">Freed, last ${Math.min(30, S.side?.retention || 30)} days</div><div class="v">${bytes(total.freed)}</div><div class="d">${total.passes ? `in ${total.passes} pass${total.passes === 1 ? '' : 'es'}, from ${appN} app${appN === 1 ? '' : 's'}` : 'Nothing freed yet'}</div></div>
+      <div><div class="k">Last pass</div><div class="v one">${total.last ? ago(total.last) : 'None yet'}</div><div class="d">${runs[0] ? `${bytes(runs[0].freed)} from ${runs[0].procs} process${runs[0].procs === 1 ? '' : 'es'}` : 'No pass yet'}</div></div>
+      <div><div class="k">Memory leaks found</div><div class="v ${open.length ? 'crit' : ''}">${open.length}</div><div class="d wrap">${open.length ? `+${bytes(worst.rate)}/h · ${esc(worst.name)}` : 'None still growing'}</div></div>
+    </div>
+    <section class="panel"><div class="panel-head"><h2>What it did</h2><span class="hint">Each pass moves the memory of apps that have been idle out of RAM and onto disk. Nothing is closed: an app reads back what it needs when you use it again, so it may pause for a moment then. It never touches the app in front, this app, Windows' own programs, or other users' processes.</span></div>
+      ${runs.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th>When</th><th>What was trimmed</th><th class="r">Memory in use</th><th class="r opt">Processes</th><th style="width:170px">Moved out of RAM</th></tr></thead><tbody>${runs.slice(0, S.showAll.has('ramruns') ? runs.length : 20).map(runRow).join('')}</tbody></table></div>
+        ${runs.length > 20 && !S.showAll.has('ramruns') ? `<div class="panel-body toolbar"><span class="muted grow">Showing the newest 20 of the last ${runs.length}${total.passes > runs.length ? `, ${total.passes} in all` : ''}.</span><button class="btn small ghost" data-showall="ramruns">Show all</button></div>` : ''}`
+        : `<div class="empty">Nothing yet. When memory in use reaches ${d.level}%, the recorder frees the memory of apps idle for ${d.idle_min} minutes or more, and the pass is listed here.</div>`}</section>
+    <section class="panel"><div class="panel-head"><h2>Memory leaks it found</h2><span class="hint">An app that kept taking memory and never gave it back: it climbed for at least 2 hours, still holds 200 MB more than it started with, gained at least 30 MB an hour, used little of the processor while it grew, and is still climbing. Closing and reopening the app gives it a fresh start. Memory the cleaner empties from a leak comes back as the app fills up again, which is how it shows.</span><span class="grow"></span>${looked ? `<span class="lbl muted">Checked ${ago(looked)}</span>` : ''}</div>
+      ${open.length || gone.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th>App</th><th class="sparkcell">Last day</th><th class="r" title="How much more memory it holds than when it started climbing">Grew</th><th class="r" title="Fastest first">Speed</th><th class="r opt">While it grew</th><th class="r opt2" title="Memory the cleaner has freed from it during this climb">Freed by the cleaner</th></tr></thead><tbody>
+        ${open.map(leakRow).join('')}
+        ${gone.length ? `<tr class="dup-h"><td colspan="6"><b style="font-weight:600">No longer growing</b> <span class="muted">· it was closed, or it let the memory go</span></td></tr>${goneShown.map(leakRow).join('')}` : ''}
+        </tbody></table></div>
+        ${gone.length > 10 && !S.showAll.has('ramgone') ? `<div class="panel-body toolbar"><span class="muted grow">Showing the 10 fastest of ${gone.length} that stopped.</span><button class="btn small ghost" data-showall="ramgone">Show all</button></div>` : ''}`
+        : `<div class="empty">No leak right now. The recorder looks again every 5 minutes, at apps that have been running for hours, so one that starts leaking shows up within a couple of hours.</div>`}</section>
+    <section class="panel"><div class="panel-head"><h2>Where the memory came from</h2><span class="hint">Every pass adds up here, so an app that is emptied again and again shows at the top.</span></div>
+      ${byApp.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th>App</th><th class="r">Times freed</th><th class="r">Last time</th><th style="width:220px">Freed in total</th></tr></thead><tbody>
+        ${byApp.slice(0, S.showAll.has('ramapps') ? byApp.length : 12).map(a => `<tr><td class="fill wrap"><b style="font-weight:600">${esc(a.name || stem(a.app))}</b><span class="sub">${esc(a.app)}</span></td>
+          <td class="r num">${a.times}</td><td class="r">${ago(a.last)}</td><td><div class="barcell"><b>${bytes(a.freed)}</b>${bar(a.freed / Math.max(1, ...byApp.map(x => x.freed)) * 100)}</div></td></tr>`).join('')}
+        </tbody></table></div>${byApp.length > 12 && !S.showAll.has('ramapps') ? `<div class="panel-body toolbar"><span class="muted grow">Showing the 12 biggest of ${byApp.length}.</span><button class="btn small ghost" data-showall="ramapps">Show all</button></div>` : ''}`
+        : '<div class="empty">Nothing freed yet.</div>'}</section>
+  </div>`;
+}
 /* ================= This PC ================= */
-const cpuFmt = (v, axis) => axis ? Math.round(v) + '%' : pct(v);
+// Axis labels: two significant digits below 1%, otherwise one decimal only when needed, so labels never repeat.
+const cpuFmt = (v, axis) => axis ? (!v ? 0 : v < 1 ? +v.toPrecision(2) : v % 1 ? +v.toFixed(1) : Math.round(v)) + '%' : pct(v);
 async function pagePC() {
-  const t = { now: pcNow, history: pcHistory, apps: pcApps, running: pcRunning, recordings: pcRecordings, insights: pcInsights }[S.tab] || pcNow;
-  const [body, now] = await Promise.all([t(), S.pcHead ? Promise.resolve(S.pcHead) : invoke('pc_now')]);
-  if (!S.pcHead || S.tab === 'now') S.pcHead = now;
+  const t = { now: pcNow, cleanup: pcCleanup, storage: pcStorage, history: pcHistory, apps: pcApps, running: pcRunning, recordings: pcRecordings, insights: pcInsights }[S.tab] || pcNow;
+  const [body, now] = await Promise.all([t(), invoke('pc_now')]);
+  S.pcHead = now;
   const h = S.pcHead.host, total = S.pcHead.latest?.mem_total;
-  const tabs = [['now', 'Now'], ['history', 'History'], ['apps', 'Apps'], ['running', 'Running', S.pcHead.apps.length], ['recordings', 'Recordings'], ['insights', 'Insights']];
+  const tabs = [['now', 'Now'], ['cleanup', 'Clean up', S.side?.cleanup_n || null], ['storage', 'Storage'], ['history', 'History'], ['apps', 'Apps'], ['running', 'Running', S.pcHead.apps.length], ['recordings', 'Recordings'], ['insights', 'Insights']];
   const sub = `<span>${esc(h.os)}</span><span>${h.cores} threads</span>${total ? `<span>${bytes(total)} memory</span>` : ''}<span>Up ${dur(h.uptime)}</span>`;
   return head(`${esc(h.name)}${S.side?.recorder ? '' : `<span class="status crit">${ic('crit')}Not recording</span>`}`, sub, '', tabs) + `<div class="body">${body}</div>`;
 }
@@ -376,18 +521,67 @@ async function pcNow() {
     ${tile('Disk and file I/O', rate(p.io_rate), 'All apps reading and writing files', r.map(x => x.io_rate))}
     ${tile('Network', rate(d.net_in + d.net_out), `in ${rate(d.net_in)} · out ${rate(d.net_out)}`, r.map(x => x.net_rate))}
     ${tile('Processes', Math.round(p.procs) || '–', 'Programs and background services', r.map(x => x.procs))}
-    ${tile('Apps open', Math.round(p.apps) || d.apps.length, 'Programs with at least one process', r.map(x => x.apps))}
+    ${p.commit_pct ? tile('Committed memory', pct(p.commit_pct), 'RAM plus page file promised to apps', r.map(x => x.commit_pct), 100) : tile('Apps open', Math.round(p.apps) || d.apps.length, 'Programs with at least one process', r.map(x => x.apps))}
   </div>
   <section class="panel">
     <div class="panel-head"><h2>Using the most right now</h2><span class="grow"></span><span class="lbl muted">Sort by</span>
       ${seg('sort', [['cpu', 'CPU'], ['mem', 'Memory'], ['io', 'I/O']], S.sort)}</div>
-    <div class="wrap-x" style="margin-top:10px"><table class="tbl"><thead><tr><th>App</th><th class="r">CPU</th><th class="r">Memory</th><th class="r">Disk and file I/O</th><th class="r">Processes</th></tr></thead><tbody>
-    ${rows.map(a => `<tr class="click" data-pcapp="${esc(a.app)}"><td><b style="font-weight:600">${esc(a.app)}</b><span class="sub">${esc(a.explain || a.name)}</span></td>
-      <td class="r"><div class="barcell"><b>${pct(a.cpu)}</b>${meter(a.cpu / maxCpu * 100, true)}</div></td>
-      <td class="r"><div class="barcell"><b>${bytes(a.mem)}</b>${meter(a.mem / maxMem * 100, true)}</div></td>
-      <td class="r num">${rate(a.io_rate)}</td><td class="r num">${a.procs}</td></tr>`).join('')}
+    <div class="wrap-x" style="margin-top:10px"><table class="tbl freeze"><thead><tr><th>App</th><th class="r ${S.sort === 'io' ? 'opt' : ''}">CPU</th><th class="r">Memory</th><th class="r ${S.sort === 'io' ? '' : 'opt'}">Disk and file I/O</th><th class="r opt2">Processes</th><th></th></tr></thead><tbody>
+    ${rows.map(a => `<tr tabindex="0" class="click" data-pcapp="${esc(a.app)}"><td class="fill">${appName(a)}</td>
+      <td class="r ${S.sort === 'io' ? 'opt' : ''}"><div class="barcell"><b>${pct(a.cpu)}</b>${bar(a.cpu / maxCpu * 100)}</div></td>
+      <td class="r"><div class="barcell"><b>${bytes(a.mem)}</b>${bar(a.mem / maxMem * 100)}</div></td>
+      <td class="r num ${S.sort === 'io' ? '' : 'opt'}">${rate(a.io_rate)}</td><td class="r num opt2">${a.procs}</td><td class="r">${stopBtn(a)}</td></tr>`).join('')}
     </tbody></table></div>
+    <p class="note" style="padding:8px 16px 12px">Not sure what is safe to stop? <button class="btn small ghost" data-tab="cleanup">${ic('broom')}Open Clean up</button> groups everything by the app that started it.</p>
   </section>`;
+}
+// Friendly name: the window title or file description when the exe name says little.
+const stem = n => String(n || '').replace(/\.exe$/i, '');
+const friendly = a => { const n = stem(a.name); return n && n.toLowerCase() !== stem(a.app).toLowerCase() ? n : stem(a.app); };
+// The name a running program file is shown by in the lists, for dialogs and toasts about it.
+const liveName = app => { const a = (S.pcHead?.apps || []).find(x => x.app === app); return a && !a.runtime ? friendly(a) : stem(app); };
+// What an app is, when that says more than its name. The full text stays in the tooltip.
+// Descriptions often open with the product name ("Google Chrome. Each tab..."); those leading sentences are dropped.
+function appParts(a) {
+  const name = friendly(a).toLowerCase(), full = (a.explain || '').replace(/\.$/, '');
+  const said = s => { const t = s.trim().toLowerCase(); return !t || name.includes(t) || t.includes(name) && t.length <= name.length + 12; };
+  const sentences = full.split(/\.\s+(?=[A-Z])/);
+  while (sentences.length && said(sentences[0])) sentences.shift();
+  return { file: stem(a.app).toLowerCase() === name ? '' : a.app, first: sentences[0] || '', full: sentences.length ? full : '' };
+}
+// One-line subtitle under an app name: the program file when it differs, then the first new sentence of what it is.
+// winNow: show a live runtime's current window title (off where the row lists all its windows).
+function appSub(a, winNow = true) {
+  const { file, first, full } = appParts(a);
+  // A runtime's total (Apps tab) covers every app it ran; the last window seen is a hint, not its name.
+  // Live, a runtime is named by its program file and its current window is the hint.
+  const win = a.window ? `last window: ${a.window}` : winNow && a.window_now ? `window: ${a.window_now}` : '';
+  const line = [win, file, first].filter(Boolean).join(' · ');
+  return line ? `<span class="sub one" title="${esc([file, full, win].filter(Boolean).join(' · '))}">${esc(line)}</span>` : '';
+}
+const appHint = a => { const { file, first } = appParts(a); return [a.window ? `last window: ${a.window}` : '', file, first].filter(Boolean).join(' · '); };
+// The full name and program file show on hover, since a long name is cut to fit the column.
+const appName = (a, winNow) => `<b class="strong" title="${esc([friendly(a), a.app].filter((v, i, l) => l.indexOf(v) === i).join(' · '))}">${esc(friendly(a))}</b>${appSub(a, winNow)}`;
+// Network trouble (the login was never tried); the recorder retries these on its own.
+// Window titles for a Running row, without the one that only repeats the row's name.
+const runTitles = a => (a.titles || '').split(' | ').filter(t => t && t !== friendly(a)).join(' | ');
+const netFail = st => ['timeout', 'lost', 'down', 'dns', 'refused'].includes(st);
+// A list cut to its first rows says so, with a way to see the rest.
+const moreRow = (shown, total, key, cols) => total > shown && !S.showAll.has(key)
+  ? `<tr class="more"><td colspan="${cols}"><span class="muted">Showing ${shown} of ${total}.</span> <button class="btn small ghost" data-showall="${key}">Show all</button></td></tr>` : '';
+// Display name for a bare program file, from the latest live readings when the app is running.
+// Recorded names first (they cover closed apps and name runtimes by their program file), then live readings.
+const exeName = exe => { const n = S.histNames?.[exe]; if (n) return n; const a = (S.pcHead?.apps || []).find(x => x.app === exe); return a ? friendly(a) : stem(exe); };
+// Stop always asks first, and says how many processes it ends.
+// named: say which app, where the row does not already show it (findings).
+function stopBtn(a, named) {
+  if (a.protected) return `<span class="muted note-sm">${/^jperformance/i.test(a.app) ? 'This app' : 'Part of Windows'}</span>`;
+  // Stop ends every process of the program file, and a live name can be one window's title, so a stop
+  // that ends more than one process names the file and the count.
+  const who = !named ? '' : a.procs > 1 ? ` ${esc(stem(a.app))} (${a.procs} processes)` : ' ' + esc(a.runtime ? stem(a.app) : friendly(a));
+  if (Date.now() - (S.asked.get(a.app) || 0) < 120000) return `<button class="btn small danger" data-force="${esc(a.app)}" data-procs="${a.procs}" data-mem="${a.mem}">Force stop${who}</button>`;
+  // Every Stop opens a confirm first.
+  return `<button class="btn small" data-stopask="${esc(a.app)}" data-label="${esc(friendly(a))}" data-procs="${a.procs}" data-mem="${a.mem}" data-win="${a.titles ? 1 : 0}">${ic('stop')}Stop${who}</button>`;
 }
 
 function heatmap(grid, label, fmtV) {
@@ -407,6 +601,7 @@ async function pcHistory() {
   const d = await invoke('pc_history', { range: S.range, which: S.histApp || null });
   const to = nowS(), from = to - S.range, b = d.bucket;
   S.histApps = d.apps || S.histApps || [];
+  if (d.names) S.histNames = { ...(S.histNames || {}), ...d.names };
   const P = d.points;
   const pick = k => P.map(p => [p.ts, p[k]]);
   const tipApps = ts => moment('pc_moment', { ts, bucket: b }).then(m => m.cpu.length ? `<div style="font-size:11px;color:var(--muted)">Most CPU then</div>` + tipRows(m.cpu, pct) : '');
@@ -420,26 +615,28 @@ async function pcHistory() {
      <div class="cols-even"><div><div class="muted" style="font-size:12px;margin-bottom:4px">Most CPU then</div>${list(m.cpu, pct)}</div><div><div class="muted" style="font-size:12px;margin-bottom:4px">Most memory then</div>${list(m.mem, bytes)}</div></div></div></section>`;
   }
   const opts = [...new Set([...(S.histApps || []), ...(S.histApp ? [S.histApp] : [])])];
+  const gl = S.histApp ? gapApp : 'Not recording';
   const charts = S.histApp ? `
-    ${lineChart({ id: 'h-cpu', title: `CPU used by ${esc(S.histApp)}`, pts: pick('cpu'), from, to, bucket: b, fmt: cpuFmt, group: 'h' })}
-    ${lineChart({ id: 'h-mem', title: 'Memory', pts: pick('mem'), from, to, bucket: b, fmt: bytes, group: 'h' })}
-    ${lineChart({ id: 'h-io', title: 'Disk and file I/O', pts: pick('io_rate'), from, to, bucket: b, fmt: rate, group: 'h', h: 90 })}
-    ${lineChart({ id: 'h-pr', title: 'Processes', pts: pick('procs'), from, to, bucket: b, fmt: v => Math.round(v), group: 'h', h: 70 })}
-    <p class="note">Gaps mean the app was not running. Network is not shown for single apps because Windows does not report it per app.</p>` : `
-    ${lineChart({ id: 'h-cpu', title: 'CPU', pts: pick('cpu'), from, to, bucket: b, max: 100, fmt: cpuFmt, group: 'h', tip: tipApps })}
-    ${lineChart({ id: 'h-mem', title: 'Memory', pts: pick('mem_pct'), from, to, bucket: b, max: 100, fmt: v => Math.round(v) + '%', group: 'h' })}
-    ${lineChart({ id: 'h-io', title: 'Disk and file I/O', pts: pick('io_rate'), from, to, bucket: b, fmt: rate, group: 'h', h: 90 })}
-    ${lineChart({ id: 'h-net', title: 'Network', pts: pick('net_rate'), from, to, bucket: b, fmt: rate, group: 'h', h: 90 })}
-    ${lineChart({ id: 'h-pr', title: 'Processes running', pts: pick('procs'), from, to, bucket: b, fmt: v => Math.round(v), group: 'h', h: 70 })}`;
+    ${lineChart({ id: 'h-cpu', title: `CPU used by ${esc(exeName(S.histApp))}`, pts: pick('cpu'), from, to, bucket: b, fmt: cpuFmt, group: 'h', gapLabel: gl })}
+    ${lineChart({ id: 'h-mem', title: 'Memory', pts: pick('mem'), from, to, bucket: b, fmt: bytes, group: 'h', gapLabel: gl })}
+    ${lineChart({ id: 'h-io', title: 'Disk and file I/O', pts: pick('io_rate'), from, to, bucket: b, fmt: rate, group: 'h', gapLabel: gl, h: 90 })}
+    ${lineChart({ id: 'h-pr', title: 'Processes', pts: pick('procs'), from, to, bucket: b, fmt: v => Math.round(v), whole: true, group: 'h', gapLabel: gl, h: 70 })}
+    <p class="note">Gaps mean the app was not running or nothing was recorded. Network is not shown for single apps because Windows does not report it per app.</p>` : `
+    ${lineChart({ id: 'h-cpu', title: 'CPU', pts: pick('cpu'), from, to, bucket: b, max: 100, fmt: cpuFmt, group: 'h', gapLabel: gl, tip: tipApps })}
+    ${lineChart({ id: 'h-mem', title: 'Memory', pts: pick('mem_pct'), from, to, bucket: b, max: 100, fmt: v => Math.round(v) + '%', group: 'h', gapLabel: gl })}
+    ${P.some(p => p.commit_pct) ? lineChart({ id: 'h-commit', title: 'Committed memory (RAM plus page file)', pts: P.map(p => [p.ts, p.commit_pct || null]), from, to, bucket: b, max: 100, fmt: v => Math.round(v) + '%', group: 'h', gapLabel: P.some(p => !p.commit_pct && p.cpu != null) ? 'No data' : gl, h: 90 }) : ''}
+    ${lineChart({ id: 'h-io', title: 'Disk and file I/O', pts: pick('io_rate'), from, to, bucket: b, fmt: rate, group: 'h', gapLabel: gl, h: 90 })}
+    ${lineChart({ id: 'h-net', title: 'Network', pts: pick('net_rate'), from, to, bucket: b, fmt: rate, group: 'h', gapLabel: gl, h: 90 })}
+    ${lineChart({ id: 'h-pr', title: 'Processes running', pts: pick('procs'), from, to, bucket: b, fmt: v => Math.round(v), whole: true, group: 'h', gapLabel: gl, h: 70 })}`;
   return `
-  <div class="toolbar"><span class="lbl">Show</span><select class="select" id="histapp"><option value="">Whole PC</option>${opts.map(a => `<option value="${esc(a)}" ${S.histApp === a ? 'selected' : ''}>${esc(a)}</option>`).join('')}</select><span class="grow"></span>${rangePicker()}</div>
+  <div class="toolbar"><span class="lbl">Show</span><select class="select" id="histapp"><option value="">Whole PC</option>${opts.map(a => `<option value="${esc(a)}" ${S.histApp === a ? 'selected' : ''}>${esc(exeName(a))}</option>`).join('')}</select><span class="grow"></span>${rangePicker()}</div>
   ${pin}
   <section class="panel"><div class="panel-body charts-stack">
     <p class="note">Hover a chart to see the same moment on every chart${S.histApp ? '' : ' and which apps were behind it'}. Click to keep the moment open.</p>
     ${charts}
   </div></section>
   <section class="panel">
-    <div class="panel-head"><h2>When ${S.histApp ? esc(S.histApp) + ' is' : 'this PC is'} busiest</h2><span class="hint">Average CPU for each hour of each weekday, from at least the last week. Darker is busier.</span></div>
+    <div class="panel-head"><h2>When ${S.histApp ? esc(exeName(S.histApp)) + ' is' : 'this PC is'} busiest</h2><span class="hint">Average CPU for each hour of each weekday, from at least the last week. Darker is busier.</span></div>
     <div class="panel-body">${heatmap(d.heat, 'CPU', pct)}</div>
   </section>`;
 }
@@ -451,6 +648,8 @@ async function pcApps() {
   if (!apps.length) return `<div class="toolbar"><span class="grow"></span>${rangePicker()}</div><section class="panel"><div class="empty">No app history in this range yet.</div></section>`;
   if (!S.appSel || !apps.some(a => a.app === S.appSel)) S.appSel = apps[0].app;
   const sel = apps.find(a => a.app === S.appSel);
+  // A new ranking can push the selected app past the first 60; show the whole list so it stays visible.
+  if (apps.indexOf(sel) >= 60) S.showAll.add('apps');
   const totalLoad = apps.reduce((t, a) => t + a.cpu_load, 0) || 1;
   const totalKey = apps.reduce((t, a) => t + a[key], 0) || 1;
   const max = Math.max(...apps.map(a => a[key])) || 1;
@@ -462,16 +661,21 @@ async function pcApps() {
   return `
   <div class="toolbar"><span class="lbl">Rank by</span>${seg('sort', [['cpu', 'CPU'], ['mem', 'Memory'], ['io', 'I/O']], S.sort)}<span class="grow"></span>${rangePicker()}</div>
   <div class="cols">
-    <section class="panel"><div class="wrap-x"><table class="tbl"><thead><tr><th>App</th><th class="r">${key === 'cpu_load' ? 'Average CPU' : key === 'mem_avg' ? 'Average memory' : 'Read and written'}</th><th class="r">Share</th></tr></thead><tbody>
-      ${apps.slice(0, 60).map(a => `<tr class="click ${a.app === S.appSel ? 'sel' : ''}" data-appsel="${esc(a.app)}"><td><b style="font-weight:600">${esc(a.app)}</b><span class="sub">${esc(a.explain || a.name)}</span></td>
-      <td class="r"><div class="barcell"><b>${shown(a)}</b>${meter(a[key] / max * 100, true)}</div></td><td class="r num">${Math.round(a[key] / (key === 'cpu_load' ? totalLoad : totalKey) * 100)}%</td></tr>`).join('')}
+    <section class="panel"><div><table class="tbl stick-head"><thead><tr><th>App</th>${key === 'cpu_load'
+      ? '<th class="r" title="This app\'s part of all CPU used by apps in this range. The list is ranked by it.">CPU share</th><th class="r" title="Average CPU over the minutes the app was running">While running</th>'
+      : `<th class="r">${key === 'mem_avg' ? 'Average memory' : 'Read and written'}</th><th class="r">Share</th>`}</tr></thead><tbody>
+      ${apps.slice(0, S.showAll.has('apps') ? apps.length : 60).map(a => `<tr tabindex="0" class="click ${a.app === S.appSel ? 'sel' : ''}" data-appsel="${esc(a.app)}"><td class="fill">${appName(a)}</td>
+      ${key === 'cpu_load'
+        ? `<td class="r"><div class="barcell"><b>${Math.round(a.cpu_load / totalLoad * 100)}%</b>${bar(a.cpu_load / totalLoad * 100)}</div></td><td class="r num">${shown(a)}</td>`
+        : `<td class="r"><div class="barcell"><b>${shown(a)}</b>${bar(a[key] / max * 100)}</div></td><td class="r num">${Math.round(a[key] / totalKey * 100)}%</td>`}</tr>`).join('')}
+      ${moreRow(60, apps.length, 'apps', 3)}
     </tbody></table></div>
-    <p class="note" style="padding:10px 16px 14px">CPU is a share of the whole processor, so 100% means every core is busy. Processes with the same name count as one app. Average CPU is over the minutes the app was running.</p></section>
-    <section class="panel"><div class="panel-head"><h2>${esc(sel.app)}</h2><span class="hint">${esc(sel.explain || sel.name)}</span></div><div class="panel-body charts-stack">
-      <dl class="kv"><dt>Running</dt><dd>${dur(sel.minutes * 60)} in this range</dd><dt>Peak CPU</dt><dd>${pct(sel.cpu_peak)}</dd><dt>Peak memory</dt><dd>${bytes(sel.mem_peak)}</dd><dt>Read and written</dt><dd>${bytes(sel.io_total)}</dd></dl>
-      ${lineChart({ id: 'a-cpu', title: 'CPU', pts: P.map(p => [p.ts, p.cpu]), from, to, bucket: b, fmt: cpuFmt, group: 'a', h: 100 })}
-      ${lineChart({ id: 'a-mem', title: 'Memory', pts: P.map(p => [p.ts, p.mem]), from, to, bucket: b, fmt: bytes, group: 'a', h: 100 })}
-      <p class="note">Gaps mean the app was not running.</p>
+    <p class="note pad">${key === 'cpu_load' ? 'CPU share is each app’s part of all CPU used by apps in this range. While running is its average CPU, where 100% means every core is busy.' : 'Processes with the same name count as one app.'}</p></section>
+    <section class="panel sticky-side"><div class="panel-head"><h2>${esc(friendly(sel))}</h2><span class="hint">${esc(appHint(sel))}</span></div><div class="panel-body charts-stack">
+      <dl class="kv"><dt>Running</dt><dd>${dur(sel.minutes * 60)} in this range</dd><dt>Highest CPU</dt><dd>${pct(sel.cpu_peak)} in one reading</dd><dt>Highest memory</dt><dd>${bytes(sel.mem_peak)} in one reading</dd><dt>Read and written</dt><dd>${bytes(sel.io_total)}</dd></dl>
+      ${lineChart({ id: 'a-cpu', title: 'CPU', pts: P.map(p => [p.ts, p.cpu]), from, to, bucket: b, fmt: cpuFmt, group: 'a', gapLabel: gapApp, h: 100 })}
+      ${lineChart({ id: 'a-mem', title: 'Memory', pts: P.map(p => [p.ts, p.mem]), from, to, bucket: b, fmt: bytes, group: 'a', gapLabel: gapApp, h: 100 })}
+      <p class="note">Gaps mean the app was not running or nothing was recorded.</p>
       <div class="toolbar"><button class="btn" data-record="${esc(sel.app)}">${ic('play')}Record this app</button><button class="btn" data-tab="running">See running apps</button></div>
     </div></section>
   </div>`;
@@ -479,18 +683,441 @@ async function pcApps() {
 
 async function pcRunning() {
   const d = await invoke('pc_now'); S.pcHead = d;
-  const key = S.sort === 'mem' ? 'mem' : 'cpu';
-  const apps = [...d.apps].sort((a, b) => b[key] - a[key]);
-  const action = a => a.protected ? '<span class="muted" style="font-size:12px">Part of Windows</span>'
-    : S.asked.has(a.app) ? `<span class="muted" style="font-size:12px;margin-right:8px">Did not close</span><button class="btn small danger" data-force="${esc(a.app)}">Force stop</button>`
-    : `<button class="btn small" data-stop="${esc(a.app)}">${ic('stop')}Stop app</button>`;
+  const key = S.sort === 'mem' ? 'mem' : S.sort === 'private' ? 'private' : 'cpu';
+  const q = S.runQuery.trim().toLowerCase();
+  const apps = [...d.apps].filter(a => !q || (a.app + ' ' + (a.name || '') + ' ' + (a.titles || '')).toLowerCase().includes(q)).sort((a, b) => b[key] - a[key]);
   return `
-  <div class="toolbar"><span class="lbl">Sort by</span>${seg('sort', [['cpu', 'CPU'], ['mem', 'Memory']], key)}<span class="grow"></span><span class="muted" style="font-size:12px">Stopping an app closes it like quitting it. Nothing is uninstalled or deleted.</span></div>
-  <section class="panel"><div class="wrap-x"><table class="tbl"><thead><tr><th>App</th><th class="r">Processes</th><th class="r">CPU</th><th class="r">Memory</th><th></th></tr></thead><tbody>
-    ${apps.map(a => `<tr><td><b style="font-weight:600">${esc(a.app)}</b><span class="sub">${esc(a.explain || a.name)}</span>${a.titles ? `<span class="titles" title="${esc(a.titles)}">${esc(a.titles)}</span>` : ''}</td>
-      <td class="r num">${a.procs}</td><td class="r num">${pct(a.cpu)}</td><td class="r num">${bytes(a.mem)}</td>
-      <td class="r">${action(a)}</td></tr>`).join('')}
-  </tbody></table></div></section>`;
+  <div class="toolbar"><input class="input" id="runq" type="search" placeholder="Find an app" value="${esc(S.runQuery)}" aria-label="Find an app"><span class="lbl">Sort by</span>${seg('sort', [['cpu', 'CPU'], ['mem', 'Memory'], ['private', 'Committed']], key)}<span class="grow"></span><span class="muted" style="font-size:12px">Stopping asks an app to close like quitting it, and ends apps with no window. Nothing is uninstalled. The list pauses while you are using it.</span></div>
+  <section class="panel"><div><table class="tbl freeze stick-head"><thead><tr><th>App</th><th class="r">Processes</th><th class="r">CPU</th><th class="r">Memory</th><th class="r" title="Private memory the app has been promised. This is what fills the commit limit.">Committed</th><th></th></tr></thead><tbody>
+    ${apps.map(a => `<tr><td class="fill">${appName(a, false)}${runTitles(a) ? `<span class="titles one" title="${esc(runTitles(a))}">${esc(runTitles(a))}</span>` : ''}</td>
+      <td class="r num">${a.procs}</td><td class="r num">${pct(a.cpu)}</td><td class="r num">${bytes(a.mem)}</td><td class="r num">${a.private ? bytes(a.private) : '–'}</td>
+      <td class="r">${stopBtn(a)}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">No app matches.</td></tr>'}
+  </tbody></table></div>
+  <p class="note" style="padding:10px 16px 14px">Processes with the same name count as one app here, so stopping node.exe ends every node.exe. To stop one session or helper on its own, use <button class="btn small ghost" data-tab="cleanup">${ic('broom')}Clean up</button>.</p></section>`;
+}
+
+/* ---------- Clean up ---------- */
+const idleText = s => s >= 3600 ? `idle ${dur(s)}` : s >= 120 ? `idle ${Math.round(s / 60)} min` : 'active now';
+async function pcCleanup() {
+  const myGen = renderPage.building;
+  const [d, now] = await Promise.all([invoke('pc_tree'), invoke('pc_now')]);
+  S.pcHead = now;
+  // Selection changes stay local until renderPage shows this result, so a dropped refresh changes nothing.
+  const cSel = new Set(S.cleanSel), seenAdd = [], selAdd = [], selDel = [];
+  for (const x of d.suggestions) { const k = key2(x.pid, x.started); if (!S.cleanSeen.has(k)) { seenAdd.push(k); if (x.checked && !cSel.has(k)) { cSel.add(k); selAdd.push(k); } } }
+  const live = new Set(d.suggestions.map(x => key2(x.pid, x.started)));
+  for (const k of [...cSel]) if (!live.has(k)) { cSel.delete(k); selDel.push(k); }
+  const info = new Map(d.suggestions.map(x => [key2(x.pid, x.started), { label: x.label, pid: x.pid, procs: x.sum.procs, mem: x.sum.mem }]));
+  pageCommits.set(myGen, () => { S.cleanInfo = info; for (const k of seenAdd) S.cleanSeen.add(k); for (const k of selAdd) S.cleanSel.add(k); for (const k of selDel) S.cleanSel.delete(k); });
+  const sel = d.suggestions.filter(x => cSel.has(key2(x.pid, x.started)));
+  const selMem = sel.reduce((t, x) => t + x.sum.mem, 0);
+  const p = now.latest?.point, total = now.latest?.mem_total || 0;
+  const KIND = { orphan: 'Left over', idle_agent: 'Idle agent session' };
+  const autoN = d.suggestions.filter(x => x.kind === 'orphan' && x.checked && x.sum.idle >= d.auto_minutes * 60).length;
+  const sugg = d.suggestions.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th style="width:28px"></th><th>What</th><th>Why</th><th class="r">Processes</th><th class="r">Memory</th><th class="r">Last active</th></tr></thead><tbody>
+    ${d.suggestions.map(x => `<tr><td><input type="checkbox" class="check" data-csel="${key2(x.pid, x.started)}" ${cSel.has(key2(x.pid, x.started)) ? 'checked' : ''} aria-label="Select ${esc(x.label)}"></td>
+      <td class="wrap whatcol"><b style="font-weight:600">${esc(x.label)}</b><span class="sub">pid ${x.pid}</span></td><td class="wrap whycol"><div class="why"><span class="chip">${KIND[x.kind] || x.kind}</span><span class="ink2">${esc(x.why)}</span></div></td>
+      <td class="r num">${x.sum.procs}</td><td class="r num">${bytes(x.sum.mem)}</td><td class="r">${idleText(x.sum.idle)}</td></tr>`).join('')}
+    </tbody></table></div>` : `<div class="empty">Nothing is left over right now. Helpers left behind by closed apps, and agent sessions idle for ${Math.round(d.agent_idle / 60)} minutes, show up here.</div>`;
+  const branchRow = b => `<tr class="branch"><td class="fill wrap"><span class="tree-ind"></span><b style="font-weight:600">${esc(b.title || b.label)}</b>${b.title ? `<span class="sub">${esc(b.label)}</span>` : ''}${b.agent ? ' <span class="chip">Agent session</span>' : ''}</td>
+      <td class="r num">${b.sum.procs}</td><td class="r num">${pct(b.sum.cpu)}</td><td class="r num">${bytes(b.sum.mem)}</td><td class="r">${idleText(b.sum.idle)}</td>
+      <td class="r"><button class="btn small" data-treestop="${key2(b.pid, b.started)}" data-label="${esc(b.title || b.label)}" data-procs="${b.sum.procs}" data-mem="${b.sum.mem}">${ic('stop')}Stop</button></td></tr>`;
+  S.grpItems = new Map(d.groups.map(g => [key2(g.pid, g.started), g.branches.map(b => ({ label: b.title || b.label, pid: b.pid, procs: b.sum.procs, mem: b.sum.mem }))]));
+  const groups = d.groups.slice(0, S.showAll.has('groups') ? d.groups.length : 30).map(g => {
+    const open = S.openGroups.has(g.pid);
+    const name = g.title ? `${esc(g.title)}<span class="sub">${esc(g.label)}</span>` : esc(g.label);
+    return `<tr ${g.branches.length ? 'tabindex="0" ' : ''}class="${g.branches.length ? 'click' : ''}" ${g.branches.length ? `data-gtoggle="${g.pid}"` : ''}><td class="fill wrap">${g.branches.length ? `<span class="caret ${open ? 'open' : ''}">›</span>` : '<span class="tree-ind"></span>'}<b style="font-weight:600">${name}</b>${g.branches.length ? ` <span class="chip">${g.branches.length} inside</span>` : ''}</td>
+      <td class="r num">${g.sum.procs}</td><td class="r num">${pct(g.sum.cpu)}</td><td class="r num">${bytes(g.sum.mem)}</td><td class="r">${idleText(g.sum.idle)}</td>
+      <td class="r"><button class="btn small" data-treestop="${key2(g.pid, g.started)}" data-label="${esc(g.title || g.label)}" data-procs="${g.sum.procs}" data-mem="${g.sum.mem}">${ic('stop')}Stop all</button></td></tr>
+      ${open ? g.branches.map(branchRow).join('') : ''}`;
+  }).join('');
+  // A RAM cleaner line says what moved out of RAM; nothing was closed, unlike a stop.
+  const logWhat = l => l.reason === d.ram_reason
+    ? `freed ${bytes(l.mem)} of RAM from ${l.procs} idle process${l.procs === 1 ? '' : 'es'}, still running`
+    : `stopped ${l.procs} process${l.procs === 1 ? '' : 'es'}, ${bytes(l.mem)}`;
+  const log = d.log.length ? d.log.slice(0, 10).map(l => `<div style="display:flex;gap:10px;padding:4px 0;font-size:12.5px"><span class="muted" style="width:120px;flex:none">${when(l.ts)}</span><span style="flex:1"><b style="font-weight:600">${esc(stem(l.name))}</b> · ${logWhat(l)}</span><span class="muted">${l.auto ? 'Automatic' : 'By you'}</span></div>`).join('') : '<span class="muted">Nothing cleaned up yet.</span>';
+  const big = d.groups[0];
+  return `
+  <div class="summary">
+    <div><div class="k">Memory in use</div><div class="v ${p && p.mem_pct >= 90 ? 'crit' : ''}">${p ? pct(p.mem_pct) : '–'}</div><div class="d">${p ? ofBytes(p.mem_used, total) : ''}</div></div>
+    <div><div class="k">Committed</div><div class="v ${p && p.commit_pct >= 90 ? 'crit' : ''}">${p?.commit_pct ? pct(p.commit_pct) : '–'}</div><div class="d">Of RAM plus page file</div></div>
+    <div><div class="k">Can be cleaned up</div><div class="v">${d.suggestions.length}</div><div class="d">${d.suggestions.length ? bytes(d.suggestions.reduce((t, x) => t + x.sum.mem, 0)) + ' in total' : 'Nothing left over'}</div></div>
+    <div><div class="k" title="Counts every process the app started, so it is more than the app's own row in Running">Biggest app, with helpers</div><div class="v one" ${big ? `title="${esc(big.title || big.label)}"` : ''}>${big ? esc(stem(big.name || big.label)) : '–'}</div><div class="d one">${big ? `${big.sum.procs} processes, ${bytes(big.sum.mem)}` : ''}</div></div>
+  </div>
+  <section class="panel"><div class="panel-head"><h2>Suggested clean-up</h2><span class="hint">Shells left idle for a while are checked for you. Look over anything else before you stop it.</span><span class="grow"></span>
+    <button class="btn primary" data-action="clean-selected" ${sel.length ? '' : 'disabled'}>${ic('broom')}Stop ${sel.length ? sel.length + ' ' : ''}selected${sel.length ? `, frees about ${bytes(selMem)}` : ''}</button></div>${sugg}</section>
+  <section class="panel"><div class="panel-head"><h2>What each app is running</h2><span class="hint">Every process is counted under the app that started it. Open an app to stop one session or helper on its own.</span></div>
+    <div><table class="tbl freeze stick-head"><thead><tr><th>App</th><th class="r">Processes</th><th class="r">CPU</th><th class="r">Memory</th><th class="r">Last active</th><th></th></tr></thead><tbody>${groups}${moreRow(30, d.groups.length, 'groups', 6)}</tbody></table></div></section>
+  <section class="panel"><div class="panel-head"><h2>Automatic clean-up</h2></div><div class="set-list" style="margin-top:4px">
+    <div class="set-row"><div><div class="t">Stop left-over helpers on their own</div><div class="d">The recorder checks once a minute and ends idle shells (cmd, PowerShell, bash) left over from closed apps, once they have been idle for the time below. Never anything with a window, anything that looks like a server, anything of Windows, or other users' processes. Off by default.</div></div><label class="switch"><input type="checkbox" id="autoclean" ${d.auto ? 'checked' : ''} aria-label="Stop left-over helpers on their own"><span></span></label></div>
+    <div class="set-row"><div><div class="t">Free RAM from idle apps</div><div class="d">When memory in use reaches the level below, the recorder checks once a minute and asks Windows to move the memory of apps idle for the time below out of RAM. Nothing is closed and nothing is lost: an app reads back what it needs when you use it again, so it may pause for a moment then. Never the app in front, this app, Windows' own programs, or other users' processes. On by default.</div></div><label class="switch"><input type="checkbox" id="ramclean" ${d.ram ? 'checked' : ''} aria-label="Free RAM from idle apps"><span></span></label></div>
+    <div class="set-row"><div><div class="t">When memory in use reaches</div><div class="d">Memory in use is ${p ? pct(p.mem_pct) : 'unknown'} right now${d.ram && p && p.mem_pct >= d.ram_pct ? ', so idle apps are being freed' : ''}.</div></div><select class="select" id="rampct">${[70, 75, 80, 85, 90].map(n => `<option value="${n}" ${d.ram_pct === n ? 'selected' : ''}>${n}%</option>`).join('')}</select></div>
+    <div class="set-row"><div><div class="t">Idle for at least</div><div class="d">Used by both switches above. Left-over helpers it ${d.auto ? 'would stop' : 'would stop if that were on'} right now: ${autoN}.</div></div><select class="select" id="automin">${[10, 15, 30, 60].map(n => `<option value="${n}" ${d.auto_minutes === n ? 'selected' : ''}>${n} minutes</option>`).join('')}</select></div>
+  </div><div class="panel-body"><div class="toolbar"><span class="muted grow" style="font-size:12px">Recently cleaned up</span><button class="btn small ghost" data-go="ram">${ic('ram')}RAM Auto Cleanup</button></div>${log}</div></section>`;
+}
+
+/* ---------- Storage ---------- */
+const num = v => Number(v || 0).toLocaleString();
+const day = ts => ts ? new Date(ts * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '–';
+// "today 3:12 PM" in the middle of a sentence.
+const whenLow = ts => when(ts).replace(/^(Today|Yesterday)/, w => w.toLowerCase());
+const stNorm = p => String(p || '').toLowerCase().replace(/[\\/]+$/, '');
+// What is selected, without counting a file again when its folder is selected too.
+function stSelected() {
+  const all = [...S.stSel.values()];
+  const dirs = all.filter(x => x.dir != null).map(x => x.path.toLowerCase() + '\\');
+  return all.filter(x => !dirs.some(d => x.path.toLowerCase().startsWith(d)));
+}
+const stCheck = (x, extra = '') => `<input type="checkbox" class="check" data-stsel="${esc(x.path)}" data-size="${x.size}"${x.dir != null ? ` data-dir="${x.dir}"` : ''}${x.parent != null ? ` data-parent="${x.parent}"` : ''} ${extra} ${S.stSel.has(x.path) ? 'checked' : ''} aria-label="Select ${esc(x.path)}">`;
+const revealBtn = p => `<button class="btn small ghost" data-streveal="${esc(p)}" title="Show in File Explorer">Show</button>`;
+// A column header that sorts by `k`. Clicking the column already sorted by flips the order.
+const ST_DIR_WORDS = { size: ['Smallest first', 'Biggest first'], name: ['A to Z', 'Z to A'], modified: ['Oldest first', 'Newest first'], files: ['Fewest files first', 'Most files first'], own: ['Smallest first', 'Biggest first'] };
+function stTh(k, label, cur, desc, attr, cls = '', style = '') {
+  const on = cur === k;
+  const next = on ? !desc : k !== 'name';
+  return `<th class="${cls}" ${style ? `style="${style}"` : ''} aria-sort="${on ? (desc ? 'descending' : 'ascending') : 'none'}"><button class="th-sort ${on ? 'on' : ''}" data-${attr}="${k}" title="Sort: ${ST_DIR_WORDS[k][next ? 1 : 0]}">${label}${on ? ic(desc ? 'sort-down' : 'sort-up') : ''}</button></th>`;
+}
+
+// A size map of one folder: each box is as big as the space it takes. Folders open on click, files select.
+function stSquarify(items, x, y, w, h) {
+  const out = [], total = items.reduce((t, i) => t + i.size, 0);
+  if (!total || w <= 0 || h <= 0) return out;
+  const scale = (w * h) / total;
+  let rest = items.map(i => ({ i, a: i.size * scale }));
+  const worst = (row, side) => { const s = row.reduce((t, r) => t + r.a, 0); let m = 0; for (const r of row) m = Math.max(m, (side * side * r.a) / (s * s), (s * s) / (side * side * r.a)); return m; };
+  while (rest.length) {
+    const side = Math.min(w, h);
+    const row = [rest[0]]; let k = 1;
+    while (k < rest.length && worst([...row, rest[k]], side) <= worst(row, side)) row.push(rest[k++]);
+    rest = rest.slice(k);
+    const s = row.reduce((t, r) => t + r.a, 0);
+    if (w >= h) { const rw = s / h; let yy = y; for (const r of row) { const rh = r.a / rw; out.push({ ...r, x, y: yy, w: rw, h: rh }); yy += rh; } x += rw; w -= rw; }
+    else { const rh = s / w; let xx = x; for (const r of row) { const rw = r.a / rh; out.push({ ...r, x: xx, y, w: rw, h: rh }); xx += rw; } y += rh; h -= rh; }
+  }
+  return out;
+}
+const ST_TYPE_COLOR = { Videos: 's2', Pictures: 's3', Music: 's4', Archives: 's1', 'Installers and disk images': 's1', 'Virtual machines and databases': 's2', Documents: 's3', Programs: 's4', Code: 's1', 'Game and 3D files': 's3', Other: 'other' };
+function stMap(f) {
+  const items = f.items.filter(x => x.size > 0).sort((a, b) => b.size - a.size).slice(0, 120);
+  if (!items.length) return '';
+  const W = Math.max(320, (document.getElementById('main')?.clientWidth || 900) - 64), H = 260;
+  const boxes = stSquarify(items, 0, 0, W, H);
+  return `<div class="st-map" style="height:${H}px" role="group" aria-label="Size map of ${esc(f.path)}">${boxes.map(b => {
+    const x = b.i;
+    // Big folders show what is inside them as a second level, below a name bar.
+    const inner = x.dir && x.kids?.length && b.w > 110 && b.h > 70;
+    let kids = '';
+    if (inner) {
+      const top = 34, kb = stSquarify(x.kids.filter(k => k.size > 0), 3, top, b.w - 6, b.h - top - 3);
+      kids = kb.map(k => stBox(k.i, k.x, k.y, k.w, k.h, b.w, b.h, f.id, true)).join('');
+    }
+    return stBox(x, b.x, b.y, b.w, b.h, W, H, f.id, false, kids);
+  }).join('')}</div><div class="st-map-key muted"><span><i class="dir"></i>Folder, click to open</span><span><i class="file"></i>File, click to select</span><span>Big folders show what is inside them.</span>${items.length < f.items.filter(x => x.size > 0).length ? `<span>The 120 biggest are shown.</span>` : ''}</div>`;
+}
+function stBox(x, bx, by, bw, bh, W, H, parentId, nested, kids = '') {
+  const label = bw > 70 && bh > 30, sel = x.path && S.stSel.has(x.path);
+  const tip = `${x.name}: ${bytes(x.size)}${x.dir ? `, ${num(x.files)} file${x.files === 1 ? '' : 's'}. Click to open.` : '. Click to select.'}`;
+  const attrs = x.dir ? `data-stdir="${x.id}"` : x.locked || x.cloud ? '' : `data-stmapsel="${esc(x.path)}" data-size="${x.size}" data-parent="${x.parent ?? parentId}"`;
+  const tag = kids ? 'div' : 'button';
+  return `<${tag} class="st-box ${x.dir ? 'dir' : 'file'} ${nested ? 'nested' : ''} ${kids ? 'has-kids' : ''} ${sel ? 'sel' : ''}" ${kids ? '' : attrs} title="${esc(tip)}" ${kids ? '' : `aria-label="${esc(tip)}"`}
+    style="left:${(bx / W * 100).toFixed(3)}%;top:${(by / H * 100).toFixed(3)}%;width:${(bw / W * 100).toFixed(3)}%;height:${(bh / H * 100).toFixed(3)}%">${kids ? `<button class="st-box-head" ${attrs} aria-label="${esc(tip)}"><span class="n">${esc(x.name)}</span><span class="s">${bytes(x.size)}</span></button>${kids}`
+    : label ? `<span class="n">${esc(x.name)}</span><span class="s">${bytes(x.size)}</span>` : ''}</${tag}>`;
+}
+// Files Windows keeps for itself, explained where they show up.
+const ST_SYSTEM_FILES = { 'pagefile.sys': 'Page file: Windows uses it as extra memory. Change its size in System > About > Advanced system settings > Performance.', 'hiberfil.sys': 'Hibernation file: holds memory while the PC hibernates. Turning off hibernation (powercfg /h off, as administrator) deletes it.', 'swapfile.sys': 'Swap file for Store apps. Windows manages it.', 'memory.dmp': 'Memory dump from a crash. Safe to delete with Windows Storage settings.' };
+
+const ST_PHASE = { walking: 'Looking through files', comparing: 'Comparing possible duplicates', caches: 'Measuring caches' };
+
+// The caches that have something to clear.
+const stJunkList = d => (d?.caches?.list || []).filter(j => j.size > 0);
+const stList = a => a.length <= 6 ? a.join(', ') : `${a.slice(0, 5).join(', ')} and ${a.length - 5} more`;
+// Caches smaller than this are folded away, apart from the three biggest of each group.
+const ST_SMALL = 50 * 1024 * 1024;
+
+function stCaches(d) {
+  const c = d.caches || {}, job = c.clean, busy = job?.state === 'running';
+  const all = stJunkList(d);
+  const sel = all.filter(j => S.stJunk.has(j.id)), selSize = sel.reduce((t, j) => t + j.size, 0);
+  const rec = all.filter(j => j.rec), recSize = rec.reduce((t, j) => t + j.size, 0);
+  const recOn = rec.length > 0 && rec.every(j => S.stJunk.has(j.id));
+  const max = Math.max(1, ...all.map(j => j.size));
+  const row = j => {
+    const open = S.stJunkOpen.has(j.id);
+    return `<tr><td><input type="checkbox" class="check" data-jsel="${esc(j.id)}" ${S.stJunk.has(j.id) ? 'checked' : ''} ${busy ? 'disabled' : ''} aria-label="Select ${esc(j.label)}"></td>
+      <td class="wrap"><b style="font-weight:600">${esc(j.label)}</b>${j.rec ? '' : ' <span class="chip" title="Select recommended leaves this one out">Slow to get back</span>'}
+        <span class="sub">${esc(j.explain)}</span>
+        ${j.running ? `<span class="sub st-open">${ic('alert')}${esc(j.running)} is open. Close it first to clear all of this.</span>` : ''}
+        ${open ? `<div class="st-paths">${j.paths.map(p => `<div><span class="mono">${esc(p.path)}</span><span class="num">${bytes(p.size)}</span>${revealBtn(p.path)}</div>`).join('')}</div>` : ''}</td>
+      <td class="r opt"><button class="btn small ghost" data-stjopen="${esc(j.id)}" aria-expanded="${open}">${open ? 'Hide folders' : `${j.paths.length} folder${j.paths.length === 1 ? '' : 's'}`}</button></td>
+      <td class="r num opt">${num(j.files)}</td><td><div class="barcell"><b>${bytes(j.size)}</b>${bar(j.size / max * 100)}</div></td></tr>`;
+  };
+  const groups = (c.groups || []).map(g => {
+    const rows = all.filter(j => j.group === g).sort((a, b) => b.size - a.size);
+    if (!rows.length) return '';
+    const fold = rows.filter((j, i) => i >= 3 && j.size < ST_SMALL), openAll = S.stJunkAll.has(g);
+    const shown = openAll ? rows : rows.filter(j => !fold.includes(j));
+    return `<tr class="dup-h"><td></td><td colspan="4"><b style="font-weight:600">${esc(g)}</b> <span class="muted">· ${bytes(rows.reduce((t, j) => t + j.size, 0))} in ${rows.length} place${rows.length === 1 ? '' : 's'}</span></td></tr>
+      ${shown.map(row).join('')}
+      ${fold.length ? `<tr><td></td><td colspan="4"><button class="btn small ghost" data-stjall="${esc(g)}" aria-expanded="${openAll}">${openAll ? 'Show fewer' : `Show ${fold.length} smaller, ${bytes(fold.reduce((t, j) => t + j.size, 0))}`}</button></td></tr>` : ''}`;
+  }).join('');
+  const prog = busy ? `<div class="apjob"><div class="grow"><b style="font-weight:600">Clearing ${esc(job.label)}</b> <span class="muted">· ${bytes(job.freed)}${job.total ? ` of about ${bytes(job.total)}` : ''} freed</span><div style="margin-top:6px">${bar(job.total ? job.freed / job.total * 100 : 0)}</div></div><button class="btn small" data-action="st-clean-cancel" ${job.cancelled ? 'disabled' : ''}>${job.cancelled ? 'Stopping' : 'Cancel'}</button></div>` : '';
+  const msg = !busy && S.stCleanMsg ? `<div class="apjob"><div class="grow">${esc(S.stCleanMsg)}</div><button class="btn small ghost" data-action="st-clean-ok">Dismiss</button></div>` : '';
+  const f = d.freed;
+  const foot = `<div class="panel-body toolbar"><span class="muted grow" style="font-size:12px">${c.pending ? `Measuring, ${num(c.pending)} place${c.pending === 1 ? '' : 's'} to go. Sizes fill in as they are measured.` : f?.times ? `Cleared with JPerformance so far: ${bytes(f.total)} in ${num(f.times)} clean-up${f.times === 1 ? '' : 's'}. Last time ${whenLow(f.last.ts)}, ${bytes(f.last.freed)}.` : 'Sizes are measured when you open this page. Measure again for fresh numbers.'}</span>
+    <button class="btn small" data-action="st-remeasure" ${c.measuring || busy ? 'disabled' : ''}>${ic('refresh')}${c.measuring ? 'Measuring' : 'Measure again'}</button></div>`;
+  return `<section class="panel"><div class="panel-head"><h2>Caches</h2><span class="hint">Programs download or rebuild these when needed. They are deleted for good, since keeping them in the Recycle Bin would free nothing. Files a running program has open are skipped.</span><span class="grow"></span>
+        <button class="btn" data-action="st-selrec" ${rec.length && !busy ? '' : 'disabled'}>${recOn ? 'Select none' : `Select recommended${recSize ? `, ${bytes(recSize)}` : ''}`}</button><button class="btn primary" data-action="st-clean" ${sel.length && !busy ? '' : 'disabled'}>${ic('broom')}Clear ${sel.length ? sel.length + ' ' : ''}selected${sel.length ? `, ${bytes(selSize)}` : ''}</button></div>
+      ${prog}${msg}
+      ${c.measuring && !all.length ? '<div class="empty">Measuring caches…</div>' : all.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th style="width:28px"></th><th>What</th><th class="r opt">Folders</th><th class="r opt">Files</th><th style="width:200px">Size</th></tr></thead><tbody>${groups}</tbody></table></div>` : '<div class="empty">No caches worth clearing.</div>'}
+      ${foot}</section>
+    <section class="panel"><div class="panel-head"><h2>Recycle Bin</h2><span class="hint">Deleted files stay on the disk until the bin is emptied.</span><span class="grow"></span><button class="btn" data-action="st-bin" ${d.bin.items ? '' : 'disabled'}>${ic('trash')}Empty Recycle Bin${d.bin.items ? `, ${bytes(d.bin.size)}` : ''}</button></div><div class="panel-body"><span class="muted">${d.bin.items ? `${num(d.bin.items)} items, ${bytes(d.bin.size)}.` : 'Empty.'}</span></div></section>`;
+}
+
+const ST_AGES = [[0, 'Everything'], [30, 'Not changed for 30 days'], [90, 'Not changed for 90 days'], [180, 'Not changed for 6 months'], [365, 'Not changed for a year']];
+// What sits in the Downloads folder, where old installers and archives pile up.
+function stDownloads(dl) {
+  if (!dl) return '';
+  if (!dl.ready) return dl.busy ? '<section class="panel"><div class="panel-head"><h2>Downloads folder</h2></div><div class="empty">Measuring Downloads…</div></section>' : '';
+  const max = Math.max(1, ...dl.items.map(x => x.size));
+  const row = x => `<tr><td>${stCheck({ path: x.path, size: x.size })}</td><td class="wrap"><b style="font-weight:600">${esc(x.name)}</b>${x.dir ? `<span class="sub">${num(x.files)} file${x.files === 1 ? '' : 's'} inside</span>` : ''}</td><td class="opt"><span class="chip">${esc(x.type)}</span></td><td class="r opt">${day(x.modified)}</td><td><div class="barcell"><b>${bytes(x.size)}</b>${bar(x.size / max * 100)}</div></td><td class="r">${revealBtn(x.path)}</td></tr>`;
+  return `<section class="panel"><div class="panel-head"><h2>Downloads folder</h2><span class="hint">${bytes(dl.size)} in ${num(dl.count)} items. Installers and archives you no longer need pile up here. ${S.stPerm ? 'What you pick is deleted for good.' : 'What you pick goes to the Recycle Bin.'}</span><span class="grow"></span>
+      <select class="select" id="stdldays" aria-label="Which downloads to list">${ST_AGES.map(([v, l]) => `<option value="${v}" ${S.stDlDays === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <button class="btn small" data-action="st-dl-setup" ${dl.items.some(x => x.setup) ? '' : 'disabled'}>Select installers and archives</button><button class="btn small" data-action="st-dl-all" ${dl.items.length ? '' : 'disabled'}>Select all listed</button></div>
+    ${dl.items.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th style="width:28px"></th><th>Name</th><th class="opt">Kind</th><th class="r opt">Last changed</th><th style="width:200px">Size</th><th></th></tr></thead><tbody>${dl.items.map(row).join('')}</tbody></table></div>
+      <div class="panel-body toolbar"><span class="muted grow">${dl.old_count > dl.items.length ? `Showing the ${num(dl.items.length)} biggest of ${num(dl.old_count)}, ${bytes(dl.old_size)} in all.` : `${num(dl.old_count)} item${dl.old_count === 1 ? '' : 's'}, ${bytes(dl.old_size)}.`}</span>${dl.old_count > dl.items.length ? `<button class="btn" data-action="st-dl-more">Show ${num(Math.min(100, dl.old_count - dl.items.length))} more</button>` : ''}</div>`
+      : `<div class="empty">${S.stDlDays ? 'Nothing in Downloads has been left that long.' : 'Downloads is empty.'}</div>`}</section>`;
+}
+
+const ST_BUILD_AGES = [[30, '30 days'], [90, '90 days'], [180, '6 months'], [365, 'a year']];
+// Build folders the scan found, and a quick way to pick the ones of projects nobody touched lately.
+function stBuilds(r) {
+  const list = r.builds.slice(0, 200), cut = nowS() - S.stBuildDays * 86400;
+  const stale = list.filter(b => b.project < cut);
+  const total = r.builds.reduce((t, b) => t + b.size, 0);
+  return `<section class="panel"><div class="panel-head"><h2>Project build folders</h2><span class="hint">${r.builds.length ? `${bytes(total)} in ${num(r.builds.length)} folders. ` : ''}Each one comes back when you build or install the project again. Tip: delete these for good; the Recycle Bin is slow with thousands of small files.</span><span class="grow"></span>
+      <select class="select" id="stbdays" aria-label="How long the project has not changed">${ST_BUILD_AGES.map(([v, l]) => `<option value="${v}" ${S.stBuildDays === v ? 'selected' : ''}>Project not changed for ${l}</option>`).join('')}</select>
+      <button class="btn small" data-action="st-build-old" ${stale.length ? '' : 'disabled'}>Select ${stale.length ? `${num(stale.length)}, ${bytes(stale.reduce((t, b) => t + b.size, 0))}` : 'those'}</button></div>
+    ${list.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th style="width:28px"></th><th>Folder</th><th class="opt">Kind</th><th class="r opt">Project last changed</th><th class="r">Size</th><th></th></tr></thead><tbody>
+      ${list.map(b => `<tr><td>${stCheck({ path: b.path, size: b.size, dir: b.id })}</td><td class="wrap mono" style="font-size:12px">${esc(b.path)}</td><td class="opt"><span class="chip" title="${esc(b.back ? 'Comes back with ' + b.back : '')}">${esc(b.kind)}</span></td><td class="r opt">${day(b.project)}</td><td class="r num">${bytes(b.size)}</td><td class="r">${revealBtn(b.path)}</td></tr>`).join('')}
+    </tbody></table></div>${r.builds.length > list.length ? `<p class="note" style="padding:10px 16px">The ${num(list.length)} biggest of ${num(r.builds.length)} are shown.</p>` : ''}` : '<div class="empty">No project build folders here.</div>'}</section>`;
+}
+
+// Big files Windows keeps for itself. They need administrator rights, so Windows' own tools remove them.
+function stWindows(d) {
+  const sys = d.caches?.system || [];
+  return `<section class="panel"><div class="panel-head"><h2>Windows files</h2><span class="hint">Windows Update leftovers, earlier Windows versions and system logs need administrator rights. Windows' own Storage settings can clear them.</span><span class="grow"></span><button class="btn" data-action="st-winset">Open Windows Storage settings</button></div>
+    ${sys.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th>What</th><th class="r">Size</th></tr></thead><tbody>
+      ${sys.map(x => `<tr><td class="wrap"><b style="font-weight:600">${esc(x.label)}</b> <span class="chip mono">${esc(x.name)}</span><span class="sub">${esc(x.explain)}</span><span class="sub">${esc(x.how)}</span></td><td class="r num">${x.size != null ? bytes(x.size) : '<span class="muted">Not measured</span>'}</td></tr>`).join('')}
+    </tbody></table></div>` : '<div class="panel-body"></div>'}</section>`;
+}
+
+async function pcStorage() {
+  const [d, ap] = await Promise.all([invoke('storage_status'), invoke('apps_status').catch(() => null)]);
+  S.stLast = d; S.apLast = ap;
+  const r = d.result, scanning = !!ST_PHASE[d.state];
+  clearTimeout(S.stT);
+  // Asks for the page to be drawn again soon. The soonest request wins.
+  let pollMs = 0;
+  const again = ms => {
+    pollMs = pollMs ? Math.min(pollMs, ms) : ms;
+    clearTimeout(S.stT);
+    // While the page is held or busy the poll waits and tries again, so progress resumes as soon as the hold ends.
+    const tick = () => { if (S.page !== 'machine' || S.machine !== 'pc' || S.tab !== 'storage') return; const fa = document.activeElement; const typing = fa && (fa.tagName === 'INPUT' || fa.tagName === 'SELECT' || fa.tagName === 'TEXTAREA') && fa.type !== 'checkbox'; if (render.busy || pointerDown || typing || document.getElementById('scrim')?.classList.contains('open')) { S.stT = setTimeout(tick, 1000); return; } render(false, 'answer'); };
+    S.stT = setTimeout(tick, pollMs);
+  };
+  if (scanning) again(1000);
+  const drives = [...d.drives].sort((a, b) => a.mount.localeCompare(b.mount));
+  const roots = [...drives.map(x => [x.mount + '\\', `Drive ${x.mount}, all of it`]), [d.home, `Your user folder (${d.home})`]];
+  const sysDrive = drives.find(x => x.mount.toUpperCase() === 'C:') || drives[0];
+  // With nothing picked yet, start on the newest saved scan of a drive or the user folder, not of some small folder.
+  const savedMain = (d.saved || []).find(x => roots.some(([v]) => stNorm(v) === stNorm(x.root)));
+  const root = S.stRoot || d.root || savedMain?.root || (sysDrive ? sysDrive.mount + '\\' : d.home);
+  // Saved results of the chosen folder, from an earlier scan, and whether they are the ones shown.
+  // A folder that is not a drive or the user folder (an earlier scan of it is saved) still gets its own choice.
+  if (!roots.some(([v]) => stNorm(v) === stNorm(root))) roots.push([root, root]);
+  const savedFor = (d.saved || []).find(x => stNorm(x.root) === stNorm(root));
+  const showing = !!r && stNorm(d.root) === stNorm(root);
+  const offerSaved = !scanning && savedFor && !showing;
+  const progress = scanning
+    ? `<div style="min-width:0;flex:1"><b style="font-weight:600">${ST_PHASE[d.state]}</b> <span class="muted">· ${dur(d.secs)}</span>
+        <div class="muted" style="font-size:12px">${d.state === 'walking' ? `${num(d.files)} files, ${bytes(d.bytes)} so far` : d.state === 'comparing' ? `${bytes(d.hashed)} of ${bytes(d.to_hash)} read` : 'Almost done'}</div>
+        ${d.state === 'walking' ? `<div class="mono st-cur" title="${esc(d.current)}">${esc(d.current)}</div>` : ''}</div>`
+    : offerSaved && !r ? `<span class="muted st-prog">Saved results from ${whenLow(savedFor.at)}: ${bytes(savedFor.total)} in ${num(savedFor.files)} files. Open them, or scan again to see what changed.</span>`
+    : d.state === 'cancelled' ? '<span class="muted">The scan was cancelled.</span>'
+    : r ? `<span class="muted st-prog">${d.saved_at ? `Results from ${whenLow(d.saved_at)}. ` : ''}${esc(d.root)}: ${bytes(r.total)} in ${num(r.files)} files. Took ${dur(r.secs)}.${r.cloud ? ` ${bytes(r.cloud)} is in OneDrive only and not on this PC.` : ''}${r.denied ? ` ${num(r.denied)} folders could not be read.` : ''}</span>` : '';
+  const easy = stJunkList(d).filter(j => j.rec).reduce((t, j) => t + j.size, 0) + d.bin.size;
+  const driveTiles = `<div class="summary">${drives.slice(0, 4).map(x => `<div><div class="k">Drive ${esc(x.mount)}</div><div class="v ${x.pct >= 90 ? 'crit' : ''}">${bytes(x.free)} free</div><div class="d">${Math.round(x.pct)}% of ${bytes(x.total)} used</div>${meter(x.pct)}</div>`).join('')}
+    <div><div class="k">Recycle Bin</div><div class="v">${bytes(d.bin.size)}</div><div class="d">${num(d.bin.items)} items, still taking space</div></div>
+    <div><div class="k">Easy to free</div><div class="v">${bytes(easy)}</div><div class="d">${d.caches?.pending ? 'So far. Still measuring caches' : 'Recommended caches and the Recycle Bin'}</div></div></div>`;
+  const scan = `<section class="panel"><div class="panel-head"><h2>Scan</h2><span class="hint">Looks through every file. Nothing is deleted until you pick it and press Delete.</span></div>
+    <div class="panel-body"><div class="toolbar"><select class="select" id="stroot" aria-label="What to scan" ${scanning ? 'disabled' : ''}>${roots.map(([v, l]) => { const sv = (d.saved || []).find(x => stNorm(x.root) === stNorm(v)); return `<option value="${esc(v)}" ${stNorm(v) === stNorm(root) ? 'selected' : ''}>${esc(l)}${sv ? `, saved ${esc(whenLow(sv.at))}` : ''}</option>`; }).join('')}</select>
+    ${scanning ? `<button class="btn" data-action="st-cancel">${ic('x')}Cancel</button>`
+      : offerSaved ? `<button class="btn primary" data-action="st-open" title="Opens what the scan from ${esc(whenLow(savedFor.at))} found, without scanning">${ic('folder')}Open saved results</button><button class="btn" data-action="st-scan">${ic('search')}Scan again</button>`
+      : `<button class="btn primary" data-action="st-scan">${ic('search')}${showing || savedFor ? 'Scan again' : 'Scan'}</button>`}${progress}</div></div></section>`;
+  const appsPanel = ap ? stApps(ap) : '';
+  if (ap && (ap.measuring || ap.jobs.some(j => j.state === 'running')) && !scanning) again(1500);
+  // A clean-up that just finished: say what it did, once.
+  const job = d.caches?.clean;
+  if (job?.state === 'done') {
+    // Marked seen only when this drawing is accepted, so a dropped refresh cannot swallow the result line.
+    pageCommits.set(renderPage.building, () => invoke('storage_clean_seen').catch(() => {}));
+    const sum = k => job.results.reduce((t, x) => t + x[k], 0);
+    const freed = sum('freed'), left = sum('left'), held = job.results.filter(x => x.in_use > 0).map(x => x.label);
+    S.stCleanMsg = (freed ? `Cleared ${bytes(freed)} in ${num(sum('files'))} files.` : 'Nothing was cleared.') + (job.cancelled ? ' Stopped before it finished.' : '')
+      + (held.length ? ` ${left ? bytes(left) : 'Some of it'} is still in use and was left (${stList(held)}). Close those programs and clear again to free it.` : '');
+    d.caches.clean = null;
+  }
+  const cleaning = d.caches?.clean?.state === 'running';
+  if (!scanning && (cleaning || d.caches?.measuring)) again(cleaning ? 700 : 1500);
+  // Clean-up that needs no scan: caches, the Recycle Bin, Downloads and what Windows keeps.
+  const onClean = !r || S.stView === 'cleanup';
+  const dl = onClean ? await invoke('storage_downloads', { days: S.stDlDays, limit: S.stDlN }).catch(() => null) : null;
+  if (onClean) S.stDlLast = dl;
+  const sel = stSelected(), selSize = sel.reduce((t, x) => t + x.size, 0);
+  const selBar = sel.length ? `<div class="stbar" role="region" aria-label="Selected"><b>${num(sel.length)} selected</b><span class="num">${bytes(selSize)}</span>
+    <label class="perm"><input type="checkbox" class="check" id="stperm" ${S.stPerm ? 'checked' : ''}> Delete for good, without the Recycle Bin</label><span class="grow"></span>
+    <button class="btn" data-action="st-clear">Clear selection</button><button class="btn danger" data-action="st-delete" ${S.stBusy ? 'disabled' : ''}>${ic('trash')}${S.stPerm ? 'Delete for good' : 'Move to Recycle Bin'}</button></div>` : '';
+  if (!r) return driveTiles + scan + (scanning || offerSaved ? '' : `<div class="empty">Scan your user folder or a whole drive to see what takes the space, biggest or smallest first, and delete what you don't need.</div>`) + stCaches(d) + stDownloads(dl) + stWindows(d) + appsPanel + selBar;
+
+
+  const view = S.stView;
+  // When a whole drive was scanned, show how its used space splits up, including what no scan can see.
+  const drv = drives.find(x => (x.mount + '\\').toLowerCase() === String(d.root).toLowerCase().replace(/\\?$/, '\\'));
+  let where = '';
+  if (drv) {
+    // The scan walks the Recycle Bin folder too, so the bin is inside the scan total: shown as its own slice, taken out of "found", and not taken out of "not readable" again.
+    const used = drv.total - drv.free, bin = Math.min(d.bin.size, r.total, used), seen = Math.max(0, Math.min(used, r.total) - bin), unseen = Math.max(0, used - r.total);
+    const part = (label, v, cls, note) => v > 0 ? `<div class="st-part"><span class="st-sw ${cls}"></span><div class="grow"><b>${label}</b>${note ? `<span class="sub">${note}</span>` : ''}</div><b class="num">${bytes(v)}</b><span class="muted num" style="width:48px;text-align:right">${Math.round(v / used * 100)}%</span></div>` : '';
+    where = `<section class="panel"><div class="panel-head"><h2>Where the ${bytes(used)} on drive ${esc(drv.mount)} goes</h2></div>
+      <div class="st-split" role="img" aria-label="Seen by the scan ${bytes(seen)}, Recycle Bin ${bytes(bin)}, not readable ${bytes(unseen)}">
+        <i class="seen" style="width:${(seen / used * 100).toFixed(2)}%"></i><i class="bin" style="width:${(bin / used * 100).toFixed(2)}%"></i><i class="unseen" style="width:${(unseen / used * 100).toFixed(2)}%"></i></div>
+      <div class="panel-body st-parts">
+        ${part('Files the scan found', seen, 'seen', 'Everything below. Open folders, or use Biggest folders, to see what they are.')}
+        ${part('Recycle Bin', bin, 'bin', 'Empty it under Caches and leftovers.')}
+        ${part('Not readable by apps', unseen, 'unseen', `Mostly restore points and shadow copies in System Volume Information${r.denied ? `, plus ${num(r.denied)} folders that could not be read` : ''}. Windows keeps these for itself. Restore points can be shrunk in System Protection.`)}
+        ${unseen > 1e9 ? `<div class="toolbar" style="margin-top:6px"><button class="btn" data-action="st-restore">Open System Protection</button><button class="btn" data-action="st-winset">Open Windows Storage settings</button></div>` : ''}
+      </div></section>`;
+  }
+  let body = '';
+  if (view === 'biggest') {
+    const bg = await invoke('storage_biggest', { sort: S.stBSort, desc: S.stBDesc, limit: S.stBN });
+    const max = Math.max(1, ...bg.dirs.map(x => S.stBSort === 'own' ? x.own : x.size));
+    const th = (k, label, cls = '', style = '') => stTh(k, label, S.stBSort, S.stBDesc, 'stbsort', cls, style);
+    body = `<section class="panel"><div class="panel-head"><h2>Biggest folders anywhere</h2><span class="hint">Every folder in ${esc(d.root)}, however deep. A folder whose space is nearly all in one subfolder is skipped, so the list points at where the space really is. "Files directly in it" leaves out subfolders.</span></div>
+      <div class="wrap-x"><table class="tbl freeze"><thead><tr><th style="width:28px"></th>${th('name', 'Folder')}${th('modified', 'Changed', 'r opt')}${th('files', 'Files', 'r opt')}${th('own', 'Files directly in it', 'r opt2')}${th('size', 'Size with subfolders', '', 'width:200px')}<th></th></tr></thead><tbody>
+      ${bg.dirs.map(x => `<tr><td>${x.locked ? `<span title="${esc(x.locked)}">${ic('shield')}</span>` : stCheck({ path: x.path, size: x.size, dir: x.id })}</td><td class="wrap"><button class="linkbtn" data-stdir="${x.id}">${ic('folder')}${esc(x.name)}</button>${x.kind ? ` <span class="chip">${esc(x.kind)}</span>` : ''}<span class="sub mono">${esc(x.path)}</span></td><td class="r opt">${day(x.modified)}</td><td class="r num opt">${num(x.files)}</td><td class="r num opt2">${bytes(x.own)}</td><td><div class="barcell"><b>${bytes(x.size)}</b>${bar((S.stBSort === 'own' ? x.own : x.size) / max * 100)}</div></td><td class="r">${revealBtn(x.path)}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">No folders.</td></tr>'}
+      </tbody></table></div>${bg.count > bg.dirs.length ? `<div class="panel-body toolbar"><span class="muted grow">Showing ${num(bg.dirs.length)} of ${num(bg.count)}.</span><button class="btn" data-action="st-bmore">Show ${num(Math.min(300, bg.count - bg.dirs.length))} more</button></div>` : ''}</section>`;
+  } else if (view === 'cleanup') {
+    body = stCaches(d) + stDownloads(dl) + stBuilds(r) + stWindows(d);
+  } else if (view === 'dups' && d.dups_busy) {
+    body = `<section class="panel"><div class="panel-head"><h2>Comparing files</h2><span class="hint">Files of the same size are read and compared byte for byte. Everything else is ready to use while this runs.</span></div>
+      <div class="panel-body"><div class="muted">${bytes(d.hashed)} of ${bytes(d.to_hash)} read</div>${bar(d.to_hash ? d.hashed / d.to_hash * 100 : 0)}</div></section>`;
+    again(1500);
+  } else if (view === 'dups') {
+    const groups = r.dups.slice(0, S.stDupN);
+    body = `<section class="panel"><div class="panel-head"><h2>${num(r.dup_groups)} sets of identical files</h2><span class="hint">Deleting the extra copies frees ${bytes(r.dup_wasted)}. Files are compared byte for byte (SHA-256). Hard links to one file are not counted, and the last copy is always kept.</span><span class="grow"></span>
+      <button class="btn small" data-action="st-dup-newest" ${groups.length ? '' : 'disabled'}>Keep newest, select the rest</button><button class="btn small" data-action="st-dup-oldest" ${groups.length ? '' : 'disabled'}>Keep oldest, select the rest</button></div>
+      ${groups.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th style="width:28px"></th><th>Copy</th><th class="r opt">Changed</th><th class="r">Size</th><th></th></tr></thead><tbody>
+        ${groups.map((g, gi) => `<tr class="dup-h"><td></td><td colspan="4"><b style="font-weight:600">${esc(g.files[0].name)}</b> <span class="muted">· ${g.files.length} copies of ${bytes(g.size)}, ${bytes(g.size * (g.files.length - 1))} extra</span></td></tr>
+          ${g.files.map(f => `<tr><td>${stCheck({ path: f.path, size: f.size, parent: f.parent }, `data-group="${gi}"`)}</td><td class="wrap"><span class="mono" style="font-size:12px">${esc(f.folder)}</span>${f.name !== g.files[0].name ? `<span class="sub">${esc(f.name)}</span>` : ''}</td><td class="r opt">${day(f.modified)}</td><td class="r num">${bytes(f.size)}</td><td class="r">${revealBtn(f.path)}</td></tr>`).join('')}`).join('')}
+      </tbody></table></div>${r.dups.length > groups.length ? `<div class="panel-body"><button class="btn" data-action="st-more">Show more</button></div>` : r.dup_groups > r.dups.length ? `<p class="note" style="padding:10px 16px">The ${num(r.dups.length)} sets that free the most are shown. Delete some and scan again to see the rest.</p>` : ''}`
+      : `<div class="empty">No duplicate files of ${bytes(r.min_file)} or more.</div>`}</section>`;
+  } else if (view === 'files') {
+    const fl = await invoke('storage_files', { kind: S.stType, q: S.stFQ, sort: S.stFSort, desc: S.stFDesc, limit: S.stFN });
+    const types = r.types || [], tmax = Math.max(1, ...types.map(t => t.size));
+    const typeRows = types.map(t => `<button class="st-type ${S.stType === t.type ? 'on' : ''}" data-sttype="${esc(t.type)}" aria-pressed="${S.stType === t.type}">
+        <span class="st-type-n">${esc(t.type)}</span><span class="st-type-bar"><i style="width:${(t.size / tmax * 100).toFixed(1)}%"></i></span><b class="num">${bytes(t.size)}</b><span class="muted num">${num(t.files)} file${t.files === 1 ? '' : 's'}</span></button>`).join('');
+    const max = Math.max(1, ...fl.files.map(f => f.size));
+    const th = (k, label, cls = '', style = '') => stTh(k, label, S.stFSort, S.stFDesc, 'stfsort', cls, style);
+    body = `<section class="panel"><div class="panel-head"><h2>What kind of files take the space</h2><span class="hint">Click a type to list its files. Counts every file in ${esc(d.root)}.</span></div>
+      <div class="panel-body st-types">${typeRows || '<div class="empty">No files.</div>'}</div></section>
+      <section class="panel"><div class="panel-head"><h2>${S.stType ? esc(S.stType) : 'All files'}</h2><span class="hint">${num(fl.count)} files of ${bytes(r.min_file)} or more, ${bytes(fl.total)} in all.</span><span class="grow"></span>
+        ${S.stType ? `<button class="btn small" data-sttype="">Show every type</button>` : ''}
+        <input class="input" id="stfq" type="search" placeholder="Find a file by name" value="${esc(S.stFQ)}" aria-label="Find a file by name" style="max-width:220px"></div>
+      <div class="wrap-x"><table class="tbl freeze"><thead><tr><th style="width:28px"></th>${th('name', 'File')}<th class="opt">Type</th>${th('modified', 'Changed', 'r opt')}${th('size', 'Size', '', 'width:200px')}<th></th></tr></thead><tbody>
+      ${fl.files.map(f => `<tr><td>${stCheck({ path: f.path, size: f.size, parent: f.parent })}</td><td class="wrap"><b style="font-weight:600">${esc(f.name)}</b><span class="sub mono">${esc(f.folder)}</span></td><td class="opt"><span class="chip">${esc(f.type)}</span></td><td class="r opt">${day(f.modified)}</td><td><div class="barcell"><b>${bytes(f.size)}</b>${bar(f.size / max * 100)}</div></td><td class="r">${revealBtn(f.path)}</td></tr>`).join('') || `<tr><td colspan="6" class="empty">${S.stFQ ? 'No file matches.' : 'No files.'}</td></tr>`}
+      </tbody></table></div>${fl.count > fl.files.length ? `<div class="panel-body toolbar"><span class="muted grow">Showing ${num(fl.files.length)} of ${num(fl.count)}.</span><button class="btn" data-action="st-fmore">Show ${num(Math.min(500, fl.count - fl.files.length))} more</button></div>` : ''}</section>`;
+  } else {
+    let f;
+    const args = id => ({ id, sort: S.stSort, desc: S.stDesc });
+    try { f = await invoke('storage_folder', args(S.stDir || 0)); } catch { S.stDir = 0; f = await invoke('storage_folder', args(0)); }
+    const crumbs = f.crumbs.map((c, i) => i === f.crumbs.length - 1 ? `<b>${esc(c.name)}</b>` : `<button class="btn small ghost" data-stdir="${c.id}">${esc(c.name)}</button>`).join('<span class="muted">›</span>');
+    const up = f.crumbs.length > 1 ? `<button class="btn small" data-stdir="${f.crumbs[f.crumbs.length - 2].id}" title="Up one folder">${ic('arrow-up')}Up</button>` : '';
+    const max = Math.max(1, ...f.items.map(x => x.size));
+    const sizeCell = x => `<div class="barcell"><b>${bytes(x.size)}</b>${bar(x.size / max * 100)}</div>`;
+    const pct = x => f.size ? `${(x.size / f.size * 100).toFixed(x.size / f.size >= 0.1 ? 0 : 1)}%` : '';
+    const th = (k, label, cls = '', style = '') => stTh(k, label, S.stSort, S.stDesc, 'stsort', cls, style);
+    const row = x => x.dir
+      ? `<tr><td>${x.locked ? `<span title="${esc(x.locked)}">${ic('shield')}</span>` : stCheck({ path: x.path, size: x.size, dir: x.id })}</td><td class="wrap"><button class="linkbtn" data-stdir="${x.id}">${ic('folder')}${esc(x.name)}</button>${x.kind ? ` <span class="chip">${esc(x.kind === 'Windows' ? 'Not scanned' : x.kind)}</span>` : ''}</td><td class="r opt">${day(x.modified)}</td><td class="r num opt">${num(x.files)}</td><td class="r muted num opt2">${pct(x)}</td><td>${sizeCell(x)}</td><td class="r">${revealBtn(x.path)}</td></tr>`
+      : `<tr><td>${x.locked || x.cloud ? `<span title="${esc(x.locked || 'In OneDrive only')}">${ic(x.cloud ? 'download' : 'shield')}</span>` : stCheck({ path: x.path, size: x.size, parent: f.id })}</td><td class="wrap">${esc(x.name)} <span class="chip">${esc(ST_SYSTEM_FILES[x.name.toLowerCase()] ? 'Windows' : x.type)}</span>${x.cloud ? ' <span class="chip">OneDrive only</span>' : ''}${ST_SYSTEM_FILES[x.name.toLowerCase()] ? `<span class="sub">${esc(ST_SYSTEM_FILES[x.name.toLowerCase()])}</span>` : ''}</td><td class="r opt">${day(x.modified)}</td><td class="r opt"></td><td class="r muted num opt2">${pct(x)}</td><td>${sizeCell(x)}</td><td class="r">${revealBtn(x.path)}</td></tr>`;
+    body = `<section class="panel"><div class="panel-head">${up}<div class="crumbs">${crumbs}</div><span class="grow"></span><span class="hint">${bytes(f.size)} in ${num(f.files_total)} files</span></div>
+      ${f.skipped ? '<div class="empty">Windows\' own folder is not scanned. Use Windows Storage settings to clean it.</div>' : `${stMap(f)}<div class="wrap-x"><table class="tbl freeze"><thead><tr><th style="width:28px"></th>${th('name', 'Name')}${th('modified', 'Changed', 'r opt')}${th('files', 'Files', 'r opt')}<th class="r opt2">Share</th>${th('size', 'Size', '', 'width:200px')}<th></th></tr></thead><tbody>
+      ${f.items.map(row).join('') || '<tr><td colspan="7" class="empty">Empty.</td></tr>'}
+      </tbody></table></div>${f.items.length < f.dirs_n + f.files_n ? `<p class="note" style="padding:10px 16px">The first ${num(f.items.length)} of ${num(f.dirs_n + f.files_n)} in this order are shown.</p>` : ''}`}</section>`;
+  }
+  const tabs = seg('stview', [['biggest', 'Biggest folders'], ['folders', 'Browse folders'], ['files', 'Files by type'], ['dups', `Duplicates${d.dups_busy ? ' · comparing' : r.dup_groups ? ' · ' + bytes(r.dup_wasted) : ''}`], ['cleanup', 'Caches and leftovers']], view);
+  // What the scan found comes first; installed apps follow below it.
+  return driveTiles + scan + where + `<div class="toolbar">${tabs}</div>` + body + appsPanel + selBar;
+}
+
+function stApps(ap) {
+  const q = S.apQ.trim().toLowerCase();
+  const running = new Map(ap.jobs.map(j => [j.id, j]));
+  const all = ap.apps.filter(a => !q || a.name.toLowerCase().includes(q) || (a.publisher || '').toLowerCase().includes(q));
+  const shown = S.apAll || q ? all : all.slice(0, 15);
+  const max = Math.max(1, ...shown.map(a => a.total));
+  const total = ap.apps.reduce((t, a) => t + a.total, 0);
+  const NL = String.fromCharCode(10);
+  const jobs = ap.jobs.filter(j => j.state !== 'running').map(j => {
+    const left = j.leftovers.reduce((t, x) => t + x.size, 0);
+    const name = `<b style="font-weight:600">${esc(j.name)}</b>`;
+    const text = j.state === 'done' ? `${name} was uninstalled. ${left ? `It left ${bytes(left)} of files behind.` : (j.msg ? '' : 'Nothing was left behind.')}${j.msg ? ' ' + esc(j.msg) : ''}`
+      : j.state === 'failed' ? `${name} could not be uninstalled. ${esc(j.msg)}`
+      : `${name}: ${esc(j.msg)}`;
+    return `<div class="apjob ${j.state === 'failed' ? 'crit' : ''}"><div class="grow">${text}${left ? `<pre class="notes" style="max-height:90px;margin-top:6px">${esc(j.leftovers.map(x => `${x.path}  (${bytes(x.size)})`).join(NL))}</pre>` : ''}</div>
+      ${left ? `<button class="btn danger small" data-apleft="${esc(j.id)}">${ic('trash')}Move leftovers to Recycle Bin</button>` : ''}<button class="btn small ghost" data-apdis="${esc(j.id)}">Dismiss</button></div>`;
+  }).join('');
+  const row = a => {
+    const job = running.get(a.id);
+    const how = a.store ? 'Removes this Microsoft Store app' : a.quiet ? 'Uninstalls without more questions' : 'Opens its own uninstaller';
+    const btn = job?.state === 'running' ? `<span class="muted">Uninstalling…</span>` : `<button class="btn small danger" data-apun="${esc(a.id)}" title="${esc(how)}">${ic('trash')}Uninstall</button>`;
+    const sub = [a.publisher, a.version && 'v' + a.version, a.installed && 'installed ' + a.installed].filter(Boolean).join(' · ');
+    return `<tr><td class="wrap"><b style="font-weight:600">${esc(a.name)}</b>${a.store ? ' <span class="chip">Store</span>' : ''}<span class="sub">${esc(sub)}</span></td>
+      <td class="r num opt3">${a.program ? bytes(a.program) : '<span class="muted">?</span>'}</td>
+      <td class="r num opt3" title="${esc(a.data_paths.join(NL))}">${a.data ? bytes(a.data) : '<span class="muted">-</span>'}</td>
+      <td><div class="barcell"><b>${a.total ? bytes(a.total) : '?'}</b>${bar(a.total / max * 100)}</div></td>
+      <td class="r" style="white-space:nowrap">${a.location ? revealBtn(a.location) : ''}${btn}</td></tr>`;
+  };
+  return `<section class="panel"><div class="panel-head"><h2>Apps</h2><span class="hint">${num(ap.count)} installed, ${bytes(total)} in all, biggest first. Program is its install folder. Data is what it keeps in AppData.${ap.measuring ? ` Measuring sizes, ${num(ap.measured)} of ${num(ap.count)} done.` : ''}</span><span class="grow"></span>
+      <input class="input" id="apq" type="search" placeholder="Find an app" value="${esc(S.apQ)}" aria-label="Find an app" style="max-width:220px"><button class="btn small" data-action="ap-rescan" ${ap.measuring ? 'disabled' : ''}>Measure again</button></div>
+    ${jobs}
+    <div class="wrap-x"><table class="tbl freeze"><thead><tr><th>App</th><th class="r opt3">Program</th><th class="r opt3">Data</th><th style="width:200px">Total</th><th></th></tr></thead><tbody>
+      ${shown.map(row).join('') || `<tr><td colspan="5" class="empty">${q ? 'No app matches.' : 'Reading installed apps…'}</td></tr>`}
+    </tbody></table></div>
+    ${!q && all.length > 15 ? `<div class="panel-body"><button class="btn" data-action="ap-all">${S.apAll ? 'Show the 15 biggest' : `Show all ${num(all.length)}`}</button></div>` : ''}</section>`;
+}
+
+async function stDelete(items, perm) {
+  // Returns the per-item results, or undefined if the call failed.
+  if (S.stBusy) { toast('A delete is already running. Wait for it to finish.', true); return; }
+  S.stBusy = true;
+  toast(`Deleting ${items.length} item${items.length === 1 ? '' : 's'}…`);
+  let r;
+  try { r = await act(invoke('storage_delete', { items: items.map(x => ({ path: x.path, dir: x.dir ?? null, parent: x.parent ?? null })), permanent: perm })); } finally { S.stBusy = false; }
+  if (!r) return;
+  const goneAlready = x => !x.ok && /no longer exists/.test(x.error || '');
+  const ok = r.filter(x => x.ok), bad = r.filter(x => !x.ok && !goneAlready(x));
+  if (perm && ok.length) S.stPerm = false;
+  for (const x of r) if (x.ok || /no longer exists/.test(x.error || '')) S.stSel.delete(x.path);
+  const gone = ok.map(x => x.path);
+  for (const k of [...S.stSel.keys()]) if (gone.some(p => k === p || k.startsWith(p + '\\'))) S.stSel.delete(k);
+  const freed = ok.reduce((t, x) => t + x.freed, 0);
+  const nGone = r.filter(goneAlready).length;
+  const why = (bad.length ? ` ${bad.length} not deleted: ${bad[0].error}` : '') + (ok.length && nGone ? ` ${nGone} ${nGone === 1 ? 'was' : 'were'} already gone.` : '');
+  // The caller decides what happens next from these results.
+  const already = r.filter(goneAlready).length;
+  toast(!ok.length && already && !bad.length ? `${already === 1 ? 'It was' : `All ${already} were`} already gone.` : ok.length ? `${perm ? 'Deleted' : 'Moved to the Recycle Bin:'} ${ok.length} item${ok.length === 1 ? '' : 's'}, ${bytes(freed)}.${perm ? '' : ' Empty the Recycle Bin to get the space back.'}${why}` : `Nothing was deleted.${why}`, (!ok.length && !already) || bad.length > 0);
+  return r;
 }
 
 async function pcRecordings() {
@@ -502,7 +1129,7 @@ async function pcRecordings() {
     const series = d.active.find(a => a.id === s.id)?.series || [];
     const to = nowS(), from = Math.max(s.started, to - 600);
     const len = to - s.started;
-    return `<section class="panel"><div class="panel-head"><h2>${esc(s.app)}</h2><span class="status">Recording · ${dur(len)}${s.planned_end ? ' of ' + dur(s.planned_end - s.started) : ''}</span><span class="grow"></span><button class="btn" data-recstop="${s.id}">${ic('stop')}Stop</button></div>
+    return `<section class="panel"><div class="panel-head"><h2 title="${esc(s.app)}">${esc(exeName(s.app))}</h2><span class="status">Recording · ${dur(len)}${s.planned_end ? ' of ' + dur(s.planned_end - s.started) : ''}</span><span class="grow"></span><button class="btn" data-recstop="${s.id}">${ic('stop')}Stop recording</button></div>
     <div class="panel-body recording-live">
       <div class="charts-stack">${lineChart({ id: 'r-cpu-' + s.id, title: 'CPU, every second', pts: series.filter(p => p.ts >= from).map(p => [p.ts, p.cpu]), from, to, bucket: 1, fmt: cpuFmt, h: 110 })}</div>
       ${sessionStats(s)}
@@ -513,8 +1140,9 @@ async function pcRecordings() {
   if (sel) {
     const series = await invoke('recording_series', { id: sel.id });
     const from = sel.started, to = sel.ended || nowS();
-    const b = Math.max(1, Math.round((to - from) / 600));
-    selBlock = `<section class="panel moment"><div class="panel-head"><h2>${esc(sel.app)}, ${when(sel.started)}</h2><span class="grow"></span><button class="btn small ghost" data-recsel="">${ic('x')}Close</button></div>
+    // Recordings keep every one-second sample, so gaps are measured against one second.
+    const b = 1;
+    selBlock = `<section class="panel moment"><div class="panel-head"><h2>${esc(exeName(sel.app))}, ${when(sel.started)}</h2><span class="grow"></span><button class="btn small ghost" data-recsel="">${ic('x')}Close</button></div>
       <div class="panel-body recording-live"><div class="charts-stack">
         ${lineChart({ id: 'rs-cpu', title: 'CPU', pts: series.map(p => [p.ts, p.cpu]), from, to, bucket: b, fmt: cpuFmt, group: 'rs', h: 100 })}
         ${lineChart({ id: 'rs-mem', title: 'Memory', pts: series.map(p => [p.ts, p.mem]), from, to, bucket: b, fmt: bytes, group: 'rs', h: 90 })}
@@ -523,7 +1151,7 @@ async function pcRecordings() {
   return `
   <section class="panel"><div class="panel-head"><h2>Start a recording</h2><span class="hint">Records one app every second, even with this window closed.</span></div>
     <div class="panel-body">${d.apps.length ? `<div class="rec-form">
-      <label class="field"><span>App</span><select class="select" id="recapp" style="min-width:240px">${d.apps.map(a => `<option value="${esc(a.app)}" ${a.app === S.recApp ? 'selected' : ''}>${esc(a.app)}</option>`).join('')}</select></label>
+      <label class="field"><span>App</span><select class="select" id="recapp" style="min-width:240px">${d.apps.map(a => `<option value="${esc(a.app)}" ${a.app === S.recApp ? 'selected' : ''}>${esc(friendly(a))}</option>`).join('')}</select></label>
       <div class="field"><span>For</span>${seg('recmin', [[10, '10 minutes'], [30, '30 minutes'], [0, 'Until I stop it']], S.recMinutes)}</div>
       <button class="btn primary" data-action="rec-start">${ic('play')}Start</button>
     </div>` : '<p class="note">No apps are running that can be recorded.</p>'}</div></section>
@@ -531,7 +1159,7 @@ async function pcRecordings() {
   ${selBlock}
   <section class="panel"><div class="panel-head"><h2>Saved recordings</h2></div>
     ${saved.length ? `<div class="wrap-x" style="margin-top:8px"><table class="tbl"><thead><tr><th>App</th><th>Started</th><th>Length</th><th class="r">Avg CPU</th><th class="r">Peak memory</th><th></th></tr></thead><tbody>
-      ${saved.map(s => `<tr class="click ${s.id === S.recSel ? 'sel' : ''}" data-recsel="${s.id}"><td><b style="font-weight:600">${esc(s.app)}</b></td><td>${when(s.started)}</td><td>${dur(s.ended - s.started)}</td><td class="r num">${pct(s.cpu_avg)}</td><td class="r num">${bytes(s.mem_peak)}</td><td class="r"><button class="btn small ghost danger" data-recdel="${s.id}">${ic('trash')}Delete</button></td></tr>`).join('')}
+      ${saved.map(s => `<tr tabindex="0" class="click ${s.id === S.recSel ? 'sel' : ''}" data-recsel="${s.id}"><td><b style="font-weight:600" title="${esc(s.app)}">${esc(exeName(s.app))}</b></td><td>${when(s.started)}</td><td>${dur(s.ended - s.started)}</td><td class="r num">${pct(s.cpu_avg)}</td><td class="r num">${bytes(s.mem_peak)}</td><td class="r"><button class="btn small ghost danger" data-recdel="${s.id}" data-label="${esc(exeName(s.app) + ', ' + when(s.started))}">${ic('trash')}Delete</button></td></tr>`).join('')}
     </tbody></table></div>` : '<div class="empty">No saved recordings yet.</div>'}</section>`;
 }
 const sessionStats = s => `<dl class="kv"><dt>Average CPU</dt><dd>${pct(s.cpu_avg)}</dd><dt>Peak CPU</dt><dd>${pct(s.cpu_peak)}</dd><dt>Average memory</dt><dd>${bytes(s.mem_avg)}</dd><dt>Peak memory</dt><dd>${bytes(s.mem_peak)}</dd><dt>Disk and file I/O</dt><dd>${bytes(s.io_total)} total</dd><dt>Processes</dt><dd>up to ${s.procs_peak}</dd><dt>Samples</dt><dd>${s.samples}</dd></dl>`;
@@ -539,7 +1167,7 @@ const sessionStats = s => `<dl class="kv"><dt>Average CPU</dt><dd>${pct(s.cpu_av
 async function pcInsights() {
   const list = (await invoke('findings', { range: S.range })).filter(f => f.machine_id === 'pc');
   return `<div class="toolbar"><span class="grow"></span>${rangePicker()}</div>
-  <section class="panel"><div class="findings">${list.length ? list.map(findingRow).join('') : '<div class="empty">Nothing found in this range. This PC looks fine.</div>'}</div></section>`;
+  <section class="panel">${findingList(list, 'Nothing found in this range. This PC looks fine.')}</section>`;
 }
 
 /* ================= Server ================= */
@@ -557,8 +1185,8 @@ async function pageServer(alias) {
     const from = Math.min(last, to) - 86400;
     return head(title, `<span class="mono">${esc(m.address)}</span>${m.via ? `<span>through ${esc(m.via)}</span>` : ''}<span>Last sample ${p ? ago(p.ts) : 'never'}</span>`, pauseBtn) + `
     <div class="body">
-      ${m.failed ? `<div class="err">${ic('crit', 'i fi')}<div><div class="t">Cannot log in: ${esc(s.label.toLowerCase())}</div><div>${esc(m.hint)}</div>${s.detail ? `<pre>${esc(s.detail)}</pre>` : ''}
-        <div class="toolbar"><button class="btn primary" data-retry="${esc(alias)}">${ic('refresh')}Retry now</button><span class="muted" style="font-size:12px">A failed login is not retried on its own, so a rejected key cannot get you banned by fail2ban.</span></div></div></div>`
+      ${m.failed ? `<div class="err">${ic('crit', 'i fi')}<div><div class="t">${netFail(s.status) ? (s.status === 'down' ? 'Cannot reach the server' : `Cannot reach: ${esc(s.label.toLowerCase())}`) : `Cannot log in: ${esc(s.label.toLowerCase())}`}</div><div>${esc(m.hint)}</div>${s.detail ? `<pre>${esc(s.detail)}</pre>` : ''}
+        <div class="toolbar"><button class="btn primary" data-retry="${esc(alias)}">${ic('refresh')}Retry now</button><span class="muted" style="font-size:12px">${netFail(s.status) ? 'It also tries again on its own.' : 'A failed login is not retried on its own, so a rejected key cannot get you banned by fail2ban.'}</span></div></div></div>`
         : !s.enabled ? `<div class="empty">Monitoring is paused for this server.</div>` : `<div class="empty">Logging in. The first readings show up within a few seconds.</div>`}
       ${old.points.length ? `<section class="panel"><div class="panel-head"><h2>Before it stopped answering</h2><span class="hint">Its history is kept.</span></div>
         <div class="panel-body charts-stack">${lineChart({ id: 'o-cpu', title: 'CPU, last day', pts: old.points.map(q => [q.ts, q.cpu]), from: to - 86400, to, bucket: old.bucket, max: 100, fmt: cpuFmt, h: 90 })}</div></section>` : ''}
@@ -582,7 +1210,7 @@ async function srvSummary(m) {
   return `
   <div class="tiles">
     ${tile('CPU', pct(p.cpu), `waiting on disk ${pct(p.iowait)} · taken by host ${pct(p.steal)}`, r.map(x => x.cpu), 100)}
-    ${tile('Memory', pct(m.latest.mem_pct), ofBytes(used, total), r.map(x => x.mem_total ? (x.mem_total - x.mem_avail) / x.mem_total * 100 : null), 100)}
+    ${tile('Memory', pct(m.latest.mem_pct), p.arc > 0 ? `${bytes(Math.max(0, total * m.latest.mem_pct / 100))} in programs` : ofBytes(used, total), r.map(x => x.mem_total ? Math.max(0, x.mem_total - x.mem_avail - Math.max(0, (x.arc || 0) - x.mem_total / 32)) / x.mem_total * 100 : null), 100)}
     ${tile('Swap', pct(m.latest.swap_pct), p.swap_total ? ofBytes(p.swap_used, p.swap_total) : 'No swap set up', r.map(x => x.swap_used), p.swap_total || null)}
     ${tile('Load', p.load1.toFixed(2), `5 min ${p.load5.toFixed(2)} · 15 min ${p.load15.toFixed(2)}`, r.map(x => x.load1))}
     ${tile('Network', rate(p.net_rx + p.net_tx), `in ${rate(p.net_rx)} · out ${rate(p.net_tx)}`, r.map(x => x.net_rx + x.net_tx))}
@@ -597,7 +1225,7 @@ async function srvSummary(m) {
   <div class="cols">
     <section class="panel"><div class="panel-head"><h2>Using the most memory</h2><span class="grow"></span><button class="btn small ghost" data-tab="processes">See all ${m.groups.length}</button></div>
       <div class="wrap-x" style="margin-top:8px"><table class="tbl"><thead><tr><th>Name</th><th class="r">CPU</th><th class="r">Memory</th></tr></thead><tbody>
-      ${groups.slice(0, 6).map(g => `<tr><td><b style="font-weight:600">${esc(g.label)}</b> <span class="chip">${esc(g.kind)}</span><span class="sub">${esc(g.explain)}</span></td><td class="r num">${pct(g.cpu)}</td><td class="r"><div class="barcell"><b>${bytes(g.mem)}</b>${meter(g.mem / maxG * 100, true)}</div></td></tr>`).join('')}
+      ${groups.slice(0, 6).map(g => `<tr><td><b style="font-weight:600">${esc(g.label)}</b> <span class="chip">${esc(g.kind)}</span><span class="sub">${esc(g.explain)}</span></td><td class="r num">${pct(g.cpu)}</td><td class="r"><div class="barcell"><b>${bytes(g.mem)}</b>${bar(g.mem / maxG * 100)}</div></td></tr>`).join('')}
       </tbody></table></div></section>
     <div class="sec">
       <section class="panel"><div class="panel-head"><h2>Disks</h2></div><div class="panel-body">
@@ -617,7 +1245,7 @@ async function srvProcesses(m) {
   return `
   <div class="toolbar"><span class="lbl">Sort by</span>${seg('sort', [['mem', 'Memory'], ['cpu', 'CPU']], key)}<span class="grow"></span><span class="lbl">Show</span>${seg('kind', [['all', 'All'], ['vm', 'VMs'], ['containers', 'Containers'], ['services', 'Services']], S.srvKind)}</div>
   <section class="panel"><div class="wrap-x"><table class="tbl"><thead><tr><th>Name</th><th>What it is</th><th class="r">Processes</th><th class="r">CPU</th><th class="r">Memory</th></tr></thead><tbody>
-    ${list.map(g => `<tr><td><b style="font-weight:600">${esc(g.label)}</b>${g.users ? `<span class="sub">${esc(g.users)}</span>` : ''}</td><td class="wrap"><span class="chip">${esc(g.kind)}</span> <span class="ink2">${esc(g.explain)}</span></td><td class="r num">${g.procs}</td><td class="r num">${pct(g.cpu)}</td><td class="r"><div class="barcell"><b>${bytes(g.mem)}</b>${meter(g.mem / maxG * 100, true)}</div></td></tr>`).join('') || '<tr><td colspan="5" class="empty">Nothing of this kind is running.</td></tr>'}
+    ${list.map(g => `<tr><td><b style="font-weight:600">${esc(g.label)}</b>${g.users ? `<span class="sub">${esc(g.users)}</span>` : ''}</td><td class="wrap"><span class="chip">${esc(g.kind)}</span> <span class="ink2">${esc(g.explain)}</span></td><td class="r num">${g.procs}</td><td class="r num">${pct(g.cpu)}</td><td class="r"><div class="barcell"><b>${bytes(g.mem)}</b>${bar(g.mem / maxG * 100)}</div></td></tr>`).join('') || '<tr><td colspan="5" class="empty">Nothing of this kind is running.</td></tr>'}
   </tbody></table></div>
   <p class="note" style="padding:10px 16px 14px">Processes are grouped by the VM, container or systemd service that started them. Memory is resident memory, so processes that share memory can add up to more than they really use.</p></section>`;
 }
@@ -641,12 +1269,17 @@ async function srvHistory(m) {
     <p class="note">Hover a chart to see the same moment on every chart and what was running. Click to keep the moment open.</p>
     ${lineChart({ id: 's-cpu', title: 'CPU', pts: pick('cpu'), from, to, bucket: b, max: 100, fmt: cpuFmt, group: 's', tip: tipG })}
     ${lineChart({ id: 's-mem', title: 'Memory', pts: pick('mem_pct'), from, to, bucket: b, max: 100, fmt: v => Math.round(v) + '%', group: 's' })}
+    ${P.some(p => p.swap_pct > 0) ? lineChart({ id: 's-swap', title: 'Swap in use', pts: pick('swap_pct'), from, to, bucket: b, max: 100, fmt: v => Math.round(v) + '%', group: 's', h: 70 }) : ''}
     ${lineChart({ id: 's-load', title: 'Load', pts: pick('load1'), from, to, bucket: b, fmt: v => v.toFixed(2), group: 's', h: 80 })}
-    ${lineChart({ id: 's-net', title: 'Network', pts: pick('net'), from, to, bucket: b, fmt: rate, group: 's', h: 80 })}
-    ${lineChart({ id: 's-io', title: 'Disk I/O', pts: pick('disk'), from, to, bucket: b, fmt: rate, group: 's', h: 80 })}
+    ${lineChart({ id: 's-iow', title: 'CPU waiting on disk', pts: pick('iowait'), from, to, bucket: b, fmt: cpuFmt, group: 's', h: 70 })}
+    ${P.some(p => p.steal >= 0.5) ? lineChart({ id: 's-steal', title: 'CPU taken by the host (steal)', pts: pick('steal'), from, to, bucket: b, fmt: cpuFmt, group: 's', h: 70 }) : ''}
+    ${lineChart({ id: 's-rx', title: 'Network in', pts: pick('net_rx'), from, to, bucket: b, fmt: rate, group: 's', h: 70 })}
+    ${lineChart({ id: 's-tx', title: 'Network out', pts: pick('net_tx'), from, to, bucket: b, fmt: rate, group: 's', h: 70 })}
+    ${lineChart({ id: 's-rd', title: 'Disk read', pts: pick('disk_read'), from, to, bucket: b, fmt: rate, group: 's', h: 70 })}
+    ${lineChart({ id: 's-wr', title: 'Disk write', pts: pick('disk_write'), from, to, bucket: b, fmt: rate, group: 's', h: 70 })}
   </div></section>`;
 }
-const srvFindings = async m => `<section class="panel"><div class="findings">${m.findings.length ? m.findings.map(findingRow).join('') : '<div class="empty">Nothing found. This server looks healthy.</div>'}</div></section>`;
+const srvFindings = async m => `<section class="panel">${findingList(m.findings, 'Nothing found. This server looks healthy.')}</section>`;
 
 /* ================= SSH keys ================= */
 async function pageKeys() {
@@ -681,13 +1314,21 @@ async function pageSettings() {
   const imp = d.imported;
   const importLine = ['jperformance', 'jserver'].map(k => `${k === 'jperformance' ? 'JPerformance' : 'JServer'}: ${imp[k] ? IMPORT_TEXT[imp[k]] : 'Not checked yet'}`).join(' · ');
   const u = S.update;
+  // Settings > Developer: what the GitHub CLI reports. Asked once while the option is on, after the page is drawn.
+  if (!d.use_gh) S.gh = null;
+  else if (!S.gh) { S.gh = 'pending'; invoke('gh_status').then(g => { S.gh = g; if (S.page === 'settings') render(); }).catch(() => { S.gh = { installed: false }; if (S.page === 'settings') render(); }); }
+  const g = S.gh;
+  const ghLine = !d.use_gh ? '' : g === 'pending' ? 'Checking the GitHub CLI…'
+    : !g.installed ? 'The GitHub CLI was not found. Install it from cli.github.com and sign in with gh auth login. Until then, checks run without it.'
+    : !g.signed_in ? 'The GitHub CLI is installed but not signed in. Run gh auth login in a terminal. Until then, checks run without it.'
+    : `Signed in to the GitHub CLI${g.user ? ' as ' + esc(g.user) : ''}. Update checks use your account.`;
   const updText = u.state === 'checking' ? 'Checking GitHub for a new release.'
     : u.state === 'up_to_date' ? `You have the latest version.${S.checkedAt ? ` Checked ${ago(S.checkedAt)}.` : ''}`
     : u.state === 'available' ? `Version ${esc(u.version)} is ready to install.`
     : u.state === 'downloading' ? `Downloading the update${u.total ? `, ${Math.round(u.done / u.total * 100)}%` : ''}.`
     : u.state === 'restarting' ? 'Restarting to finish the update.'
     : u.state === 'failed' ? `The update check failed: ${esc(u.message)}`
-    : 'Checks GitHub for a new release when it opens and every 30 minutes.';
+    : 'Checks GitHub for a new release when it opens and every 2 hours. Press Refresh to check now.';
   return head('Settings', 'Everything here is saved on this PC.') + `
   <div class="body" style="max-width:920px">
     <section class="panel"><div class="panel-head"><h2>Servers over SSH</h2></div>
@@ -702,11 +1343,11 @@ async function pageSettings() {
       <div style="padding:0 16px 16px"><div class="safe">${ic('shield')}<div><b style="color:var(--ink)">What JPerformance does on a server</b><ul>
         <li>Runs read-only commands only: /proc, /sys, df, docker ps, qm list. Nothing is installed or written.</li>
         <li>Never asks for a password and never accepts a new or changed host key.</li>
-        <li>Does not retry a failed login on its own, so fail2ban will not ban you.</li></ul></div></div></div>
+        <li>Does not retry a rejected key on its own, so fail2ban will not ban you. A dropped network is retried on its own.</li></ul></div></div></div>
     </section>
     <section class="panel"><div class="panel-head"><h2>Recording</h2></div><div class="set-list" style="margin-top:4px">
       <div class="set-row"><div><div class="t">Start with Windows</div><div class="d">Keeps recording after a restart. A small helper keeps going when this window is closed.</div></div><label class="switch"><input type="checkbox" id="autostart" ${d.autostart ? 'checked' : ''} aria-label="Start with Windows"><span></span></label></div>
-      <div class="set-row"><div><div class="t">Keep history for</div><div class="d">Older samples are removed automatically, for this PC and for servers.</div></div><select class="select" id="retention">${[7, 30, 90, 180, 365].map(n => `<option value="${n}" ${d.retention === n ? 'selected' : ''}>${n} days</option>`).join('')}</select></div>
+      <div class="set-row"><div><div class="t">Keep history for</div><div class="d">Older samples are removed automatically, for this PC and for servers.</div></div><select class="select" id="retention" data-was="${d.retention}">${[7, 30, 90, 180, 365].map(n => `<option value="${n}" ${d.retention === n ? 'selected' : ''}>${n} days</option>`).join('')}</select></div>
       <div class="set-row"><div><div class="t">History from JPerformance and JServer</div><div class="d">Copied once on first start. The old apps and their data were not changed. ${importLine}.</div></div><span></span></div>
       <div class="set-row"><div><div class="t">Recorder</div><div class="d">${d.recorder ? 'Running in the background.' : 'Not running, so nothing is being recorded.'}</div></div>${d.recorder ? '<span></span>' : `<button class="btn" data-action="start-recorder">${ic('play')}Start</button>`}</div>
     </div></section>
@@ -714,7 +1355,10 @@ async function pageSettings() {
       <div class="set-row"><div><div class="t">Theme</div></div>${seg('theme', [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']], S.theme)}</div>
     </div></section>
     <section class="panel"><div class="panel-head"><h2>Updates</h2></div><div class="set-list" style="margin-top:4px">
-      <div class="set-row"><div><div class="t">JPerformance Unified ${esc(d.version)}</div><div class="d">${updText} Downloads are checked against the SHA-256 GitHub publishes before they replace the app.</div></div><div class="toolbar">${u.state === 'available' ? `<button class="btn" data-dialog="update">What's new in ${esc(u.version)}</button><button class="btn primary" data-action="install">${ic('download')}Install and restart</button>` : `<button class="btn" data-action="check" ${u.state === 'checking' || u.state === 'downloading' ? 'disabled' : ''}>${ic('refresh')}${u.state === 'checking' ? 'Checking' : 'Check for updates'}</button>`}</div></div>
+      <div class="set-row"><div><div class="t">JPerformance Unified ${esc(d.version)}</div><div class="d">${updText} Downloads are checked against the SHA-256 GitHub publishes before they replace the app.</div></div><div class="toolbar">${u.state === 'available' ? `<button class="btn" data-dialog="update">What's new in ${esc(u.version)}</button><button class="btn primary" data-action="install">${ic('download')}Install and restart</button>` : ''}<button class="btn" data-action="update-refresh" ${u.state === 'checking' || u.state === 'downloading' || u.state === 'restarting' ? 'disabled' : ''}>${ic('refresh')}${u.state === 'checking' ? 'Checking' : u.state === 'downloading' ? 'Downloading' : 'Refresh'}</button></div></div>
+    </div></section>
+    <section class="panel"><div class="panel-head"><h2>Developer</h2><span class="hint">For people who use GitHub's command-line tools. Nothing here is needed to use the app.</span></div><div class="set-list" style="margin-top:4px">
+      <div class="set-row"><div><div class="t">Use GitHub CLI for update checks</div><div class="d">Update checks use the account you signed in to the GitHub CLI (gh) with. GitHub then allows 5,000 checks an hour instead of the 60 shared by everything on your internet connection. Your sign-in stays in gh and is only sent to GitHub. Off by default.</div>${ghLine ? `<div class="d" style="margin-top:4px">${ghLine}</div>` : ''}</div><label class="switch"><input type="checkbox" id="usegh" ${d.use_gh ? 'checked' : ''} aria-label="Use GitHub CLI for update checks"><span></span></label></div>
     </div></section>
     <section class="panel"><div class="panel-head"><h2>Data</h2></div><div class="panel-body"><dl class="kv"><dt>Stored in</dt><dd class="mono">${esc(d.data_dir)}</dd><dt>Size</dt><dd>${bytes(d.size)}</dd><dt>Leaves this PC</dt><dd>Never. Only the update check talks to GitHub.</dd></dl></div></section>
   </div>`;
@@ -724,20 +1368,64 @@ async function pageSettings() {
 let pendingDialog = null;
 function dialog(kind, arg) {
   const d = document.getElementById('dialog');
-  pendingDialog = { kind, arg };
+  if (!pendingDialog) openerFocus = document.activeElement;
+  pendingDialog = { kind, arg, opener: pendingDialog ? pendingDialog.opener : selectorOf(document.activeElement) };
   const u = S.update;
-  d.innerHTML = kind === 'force' ? `<h3>Force stop ${esc(arg)}?</h3><p>It did not close when asked. Forcing it ends it right away, and any unsaved work in it is lost.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Force stop</button></div>`
-    : kind === 'delete' ? `<h3>Delete this recording?</h3><p>Its samples are removed for good. Other history is kept.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Delete recording</button></div>`
+  d.innerHTML = kind === 'stopapp' ? `<h3>Stop ${esc(arg.label || stem(arg.app))}?</h3><p>This ends every process of ${esc(arg.app)}${arg.procs === 1 ? ' (1 running' : ` (${arg.procs} running`}, using ${bytes(arg.mem)}).${arg.win ? ' Its windows are asked to close first so it can save.' : ' It has no window, so it is ended right away.'}${arg.procs > 1 ? ' To stop only one of them, use Clean up.' : ''}</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Stop${arg.procs > 1 ? ' all ' + arg.procs : ''}</button></div>`
+    : kind === 'tree' ? `<h3>Stop ${esc(arg.label)}?</h3><p>${arg.procs ? `This ends ${arg.procs} process${arg.procs === 1 ? '' : 'es'} using ${bytes(arg.mem)}: the program and everything it started.` : 'Each one is ended with everything it started.'} Anything with a window is asked to close first so it can save. Other programs with the same name are not touched.</p>${arg.items?.length ? `<pre class="notes" style="max-height:220px;overflow:auto">${esc(arg.items.slice(0, 40).map(x => `${x.label} (pid ${x.pid}): ${x.procs} process${x.procs === 1 ? '' : 'es'}, ${bytes(x.mem)}`).join(String.fromCharCode(10)))}${arg.items.length > 40 ? esc(String.fromCharCode(10) + `and ${arg.items.length - 40} more`) : ''}</pre>` : ''}<div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Stop</button></div>`
+    : kind === 'force' ? `<h3>Force stop ${esc(liveName(arg.app))}?</h3><p>It did not close when asked. Forcing it ends every process of ${esc(arg.app)}${arg.procs ? ` (${arg.procs} running, using ${bytes(arg.mem)})` : ''} right away, and any unsaved work in it is lost.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Force stop</button></div>`
+    : kind === 'stdelete' ? `<h3>${arg.perm ? 'Delete' : 'Move'} ${arg.items.length} item${arg.items.length === 1 ? '' : 's'} (${bytes(arg.size)})${arg.perm ? ' for good' : ' to the Recycle Bin'}?</h3>
+        <p>${arg.perm ? 'They cannot be restored.' : 'You can restore them from the Recycle Bin. The space comes back when you empty it. If something is too big for the Recycle Bin, Windows asks before deleting it for good.'}</p>
+        <pre class="notes" style="max-height:200px;overflow:auto">${esc(arg.items.slice(0, 40).map(x => x.path).join(String.fromCharCode(10)))}${arg.items.length > 40 ? esc(String.fromCharCode(10) + `and ${arg.items.length - 40} more`) : ''}</pre>
+        <div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>${arg.perm ? 'Delete for good' : 'Move to Recycle Bin'}</button></div>`
+    : kind === 'stclean' ? `<h3>Clear ${arg.labels.length} cache${arg.labels.length === 1 ? '' : 's'} (${bytes(arg.size)})?</h3><p>${esc(stList(arg.labels))}. These are deleted for good. Programs download or rebuild what they need, so the first start may be a little slower.</p>
+        ${arg.open.length ? `<p>${esc(stList(arg.open))} ${arg.open.length === 1 ? 'is' : 'are'} open, so the files in use stay. Close ${arg.open.length === 1 ? 'it' : 'them'} first to clear everything.</p>` : ''}
+        ${arg.slow.length ? `<p>${esc(stList(arg.slow))}: getting ${arg.slow.length === 1 ? 'this' : 'these'} back takes a long download or an install step.</p>` : ''}
+        <div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Clear</button></div>`
+    : kind === 'apun' ? `<h3>Uninstall ${esc(arg.name)}?</h3><p>${arg.total ? `It takes about ${bytes(arg.total)}. ` : ''}${arg.store ? 'Windows removes it from this PC.' : arg.quiet ? 'It is removed without more questions.' : 'Its own uninstaller opens. Follow its steps to finish.'}${arg.admin ? ' Windows asks for permission first.' : ''} Files it leaves behind are listed afterwards so you can remove them too.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Uninstall</button></div>`
+    : kind === 'stbin' ? `<h3>Empty the Recycle Bin?</h3><p>${num(arg.items)} items (${bytes(arg.size)}) are deleted for good on every drive.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Empty Recycle Bin</button></div>`
+    : kind === 'delete' ? `<h3>Delete the recording of ${esc(arg.label || 'this app')}?</h3><p>Its samples are removed for good. Other history is kept.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Delete recording</button></div>`
+    : kind === 'apleft' ? `<h3>Move ${arg.items.length} leftover item${arg.items.length === 1 ? '' : 's'} (${bytes(arg.size)}) to the Recycle Bin?</h3><p>These were left behind by an uninstalled app. You can restore them from the Recycle Bin, and the space comes back when you empty it.</p><pre class="notes" style="max-height:200px;overflow:auto">${esc(arg.items.slice(0, 40).map(x => x.path).join(String.fromCharCode(10)))}${arg.items.length > 40 ? esc(String.fromCharCode(10) + `and ${arg.items.length - 40} more`) : ''}</pre><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Move to Recycle Bin</button></div>`
+    : kind === 'keep' ? `<h3>Keep history for ${arg.days} days?</h3><p>Samples older than ${arg.days} days are removed for this PC and every server. This cannot be undone. The clean-up runs about once an hour while the recorder is running, so older samples can stay for up to an hour.</p><div class="row"><button class="btn" data-close>Cancel</button><button class="btn danger" data-confirm>Remove older history</button></div>`
     : `<h3>What's new in ${esc(u.version)}</h3><pre class="notes">${esc(u.notes || 'No notes for this release.')}</pre><div class="row"><button class="btn" data-close>Later</button><button class="btn primary" data-confirm>Install and restart</button></div>`;
+  const title = d.querySelector('h3');
+  if (title) { title.id = 'dialog-title'; d.setAttribute('aria-labelledby', 'dialog-title'); }
   document.getElementById('scrim').classList.add('open');
-  d.querySelector('[data-confirm]')?.focus();
+  // Cancel has focus, so Enter does not run a destructive action by accident.
+  (d.querySelector('[data-close]') || d.querySelector('[data-confirm]'))?.focus();
 }
-const closeDialog = () => { document.getElementById('scrim').classList.remove('open'); pendingDialog = null; };
+const closeDialog = () => {
+  document.getElementById('scrim').classList.remove('open');
+  const was = pendingDialog;
+  pendingDialog = null;
+  const back = openerFocus;
+  openerFocus = null;
+  if (back && document.body.contains(back)) back.focus?.();
+  else if (was?.opener) document.querySelector(was.opener)?.focus?.();
+  // The picker keeps the value the user chose until it is put back here (the page is not redrawn).
+  if (was?.kind === 'keep') { const sel = document.getElementById('retention'); if (sel) sel.value = sel.dataset.was; }
+};
 async function confirmDialog() {
-  const p = pendingDialog; closeDialog(); if (!p) return;
-  if (p.kind === 'force') await stopApp(p.arg, true);
-  if (p.kind === 'delete') { await act(invoke('delete_recording', { id: p.arg }), 'Recording deleted'); if (S.recSel === p.arg) S.recSel = null; }
+  const p = pendingDialog; pendingDialog = null; closeDialog(); if (!p) return;
+  // The redraw after the action puts focus back on the button that opened the dialog.
+  pendingFocus = p.opener;
+  if (p.kind === 'apleft') {
+    const r = await stDelete(p.arg.items, false);
+    // Only the leftovers that are gone leave the list. The job ends when none are left.
+    const gone = (r || []).filter(x => x.ok || /no longer exists/.test(x.error || '')).map(x => x.path);
+    if (gone.length) await act(invoke('apps_forget_leftovers', { id: p.arg.id, paths: gone }));
+    return render();
+  }
+  if (p.kind === 'keep') { await act(invoke('set_retention', { days: p.arg.days }), `History is kept for ${p.arg.days} days`); return render(); }
+  if (p.kind === 'force') await stopApp(p.arg.app, true);
+  if (p.kind === 'stopapp') await stopApp(p.arg.app, false);
+  if (p.kind === 'tree') await stopTree(p.arg.targets, p.arg.reason);
+  if (p.kind === 'delete') { await act(invoke('delete_recording', { id: p.arg.id }), 'Recording deleted'); if (S.recSel === p.arg.id) S.recSel = null; }
   if (p.kind === 'update') await installUpdate();
+  if (p.kind === 'stdelete') await stDelete(p.arg.items, p.arg.perm);
+  if (p.kind === 'stclean') { S.stCleanMsg = null; if (await act(invoke('storage_clean', { ids: p.arg.ids }))) S.stJunk.clear(); }
+  if (p.kind === 'apun') { if (await act(invoke('apps_uninstall', { id: p.arg.id }))) toast(`Uninstalling ${p.arg.name}…`); }
+  if (p.kind === 'stbin') { const freed = await act(invoke('storage_empty_bin')); if (freed != null) toast(`Recycle Bin emptied, ${bytes(freed)} freed.`); }
   render();
 }
 let toastT;
@@ -757,25 +1445,100 @@ const STOP_TEXT = {
 async function stopApp(app, force) {
   const r = await act(invoke('stop_app', { appName: app, force }));
   if (!r) return;
-  if (r.result === 'asked') { S.asked.add(app); toast(`Asked ${app} to close. If it does not close, use Force stop.`); setTimeout(() => render(), 3000); }
-  else { S.asked.delete(app); toast(STOP_TEXT[r.result](app), r.result === 'denied'); }
+  quietRefresh.cleanAt = 0;
+  if (r.result === 'asked') { S.asked.set(app, Date.now()); toast(`Asked ${liveName(app)} to close. If it does not close, use Force stop.`); setTimeout(() => render(false, 'answer'), 3000); }
+  else { S.asked.delete(app); toast(STOP_TEXT[r.result](liveName(app)), r.result === 'denied'); }
+}
+async function stopTree(targets, reason) {
+  const r = await act(invoke('stop_tree', { targets, force: false, reason: reason || null }));
+  if (!r) return;
+  const ended = r.filter(x => x.result === 'ended' || x.result === 'closed');
+  const asked = r.filter(x => x.result === 'asked'), denied = r.filter(x => x.result === 'denied');
+  const freed = ended.reduce((t, x) => t + (x.mem || 0), 0);
+  for (const x of r) if (x.result === 'ended' || x.result === 'closed' || x.result === 'not_running') { const t = targets.find(k => x.pid === undefined || k[0] === x.pid); if (t && x.pid !== undefined) S.cleanSel.delete(key2(t[0], t[1])); }
+  if (r.every(x => x.pid === undefined)) for (const k of targets) S.cleanSel.delete(key2(k[0], k[1]));
+  quietRefresh.cleanAt = 0;
+  toast(ended.length ? `Stopped ${ended.length === 1 ? ended[0].name : ended.length + ' items'}, freed about ${bytes(freed)}.${asked.length ? ` ${asked.length} still has a window open, maybe asking to save.` : ''}${denied.length ? ` ${denied.length} could not be stopped; it may need administrator rights.` : ''}`
+    : asked.length ? `${asked[0].name} was asked to close and still has a window open. It may be asking to save.`
+    : denied.length ? `Windows did not allow stopping ${denied[0].name}. It may need administrator rights.` : r.some(x => x.result === 'protected') ? 'That is part of Windows and was not stopped.' : 'It had already stopped.', !ended.length && !!denied.length);
 }
 async function installUpdate() {
   S.update = await act(invoke('install_update')) || S.update;
   pollUpdate();
 }
 
+/* ================= Slow right now ================= */
+// Shown on every page while this PC is struggling, with what is behind it and a way to stop it.
+function pressureBanner() {
+  const pr = S.side?.pressure;
+  if (!pr || S.page === 'settings' || (S.page === 'machine' && S.machine === 'pc' && S.tab === 'cleanup')) return '';
+  const what = pr.kind === 'commit' ? `Committed memory is at ${pct(pr.value)}. When it reaches 100%, apps crash or refuse to open.`
+    : pr.kind === 'mem' ? `Memory is ${pct(pr.value)} full, so Windows is moving things to disk and typing can lag.`
+    : `The processor has been ${pct(pr.value)} busy for the last ${pr.secs} s, so the PC responds slowly.`;
+  return `<div class="pressure" role="status">${ic('alert', 'i fi')}<div class="grow"><b>This PC is slow right now.</b> ${what}
+    <div class="pr-apps">${pr.top.map(a => `<span class="pr-app"><b>${esc(friendly(a))}</b> ${pr.kind === 'cpu' ? pct(a.cpu) + ' CPU' : bytes(pr.kind === 'commit' ? a.private || a.mem : a.mem)}${a.protected ? '' : ` <button class="btn small" data-stopask="${esc(a.app)}" data-label="${esc(friendly(a))}" data-procs="${a.procs}" data-mem="${a.mem}" data-win="${a.titles ? 1 : 0}">${ic('stop')}Stop</button>`}</span>`).join('')}</div></div>
+    <button class="btn primary" data-go="machine" data-m="pc" data-t="cleanup">${ic('broom')}Clean up</button></div>`;
+}
+
 /* ================= Render ================= */
 // Writes only when the markup changed, so a quiet refresh does not touch the page.
 function setHTML(el, html) { if (el._html !== html) { el._html = html; el.innerHTML = html; return true; } return false; }
+// Keeps --head-h equal to the sticky header's height, so sticky panels sit just below it when it wraps.
+const headObs = new ResizeObserver(es => { for (const e of es) document.getElementById('main').style.setProperty('--head-h', e.target.offsetHeight + 'px'); fitSticky(); });
+// A sticky panel taller than the space under the header would trap its own bottom, so it scrolls normally instead.
+function fitSticky() {
+  const main = document.getElementById('main'), p = main.querySelector('.sticky-side'), h = main.querySelector(':scope > .head');
+  if (p) p.classList.toggle('no-stick', p.offsetHeight + (h ? h.offsetHeight : 0) + 24 > main.clientHeight);
+}
+addEventListener('resize', fitSticky);
+function watchHead(main) {
+  const h = main.querySelector(':scope > .head');
+  if (h === watchHead.el) return;
+  if (watchHead.el) headObs.unobserve(watchHead.el);
+  watchHead.el = h;
+  if (h) headObs.observe(h);
+}
 let loadT;
-async function render(scrollTop) {
+// quiet: a background refresh, dropped if the user started pointing at or focusing a list while it loaded.
+// quiet === 'answer': the redraw that answers the user's own click. Hovering never holds it, only a press or a
+// text field in use, so the result of the click shows while the pointer is still where they clicked.
+const pageCommits = new Map();
+async function render(scrollTop, quiet) {
+  // Already held when a background refresh starts: nothing is fetched or written, and no redraw in flight is cancelled.
+  if (quiet && holdRefresh(quiet === 'answer')) return;
   const gen = ++renderGen;
   render.busy = (render.busy || 0) + 1;
-  try { await renderPage(gen, scrollTop); } finally { render.busy--; }
+  // The search boxes keep their text in S, so a redraw after they sat idle puts focus and caret back.
+  const fa = document.activeElement, keep = fa && SEARCH_IDS.includes(fa.id) ? { id: fa.id, a: fa.selectionStart, b: fa.selectionEnd } : null;
+  try { await renderPage(gen, scrollTop, quiet); } finally { render.busy--; }
+  if (keep && document.activeElement?.id !== keep.id) { const el = document.getElementById(keep.id); if (el) { el.focus(); try { el.setSelectionRange(keep.a, keep.b); } catch {} } }
 }
-async function renderPage(gen, scrollTop) {
+// The user is pointing at or working in a list, so a background refresh must not replace it.
+// Input in the last 30 s. A hold never outlasts that, so a pointer parked on a list or a forgotten selection
+// cannot freeze the live numbers for good. A pressed button always holds, so a click is not lost to a swap.
+let lastInput = Date.now(), pointerDown = false, downAt = 0;
+for (const ev of ['pointermove', 'keydown', 'wheel']) addEventListener(ev, () => { lastInput = Date.now(); }, { capture: true, passive: true });
+document.addEventListener('selectionchange', () => { lastInput = Date.now(); });
+addEventListener('pointerdown', () => { pointerDown = true; downAt = lastInput = Date.now(); }, true);
+for (const ev of ['pointerup', 'pointercancel', 'blur', 'click', 'change']) addEventListener(ev, () => { pointerDown = false; }, true);
+const holdRefresh = answer => {
+  // A press held down holds the page, so the click is not lost to a swap. It expires like the rest, so a
+  // press released outside the window cannot hold the page for good.
+  if (pointerDown && Date.now() - downAt < 30000) return true;
+  // A text field or picker in use always holds: replacing it would drop what is being typed or chosen.
+  const f = document.activeElement;
+  // It lets go after 30 s without input, so a dismissed picker or an idle search box cannot freeze the page for good.
+  if (f && (f.tagName === 'SELECT' || f.tagName === 'INPUT' || f.tagName === 'TEXTAREA') && f.type !== 'checkbox' && (Date.now() - lastInput < 30000 || (f.tagName !== 'SELECT' && !SEARCH_IDS.includes(f.id) && !(f.tagName === 'INPUT' && !f.value)))) return true;
+  if (answer || Date.now() - lastInput > 30000) return false;
+  // Keyboard focus holds a list (a mouse click leaves :focus but not :focus-visible, so clicking never freezes it).
+  if (document.querySelector('.canvas:hover, .freeze:hover, .stick-head:hover, .pressure:hover, .fleet:hover, .findings:hover, #main .tbl:hover, #main .panel-head:hover, #main .toolbar:hover, #main .stbar:hover, #main .apjob:hover, #main :focus-visible')) return true;
+  // Text the user selected to copy would be wiped by the redraw.
+  return !!String(document.getSelection?.() || '').trim();
+};
+async function renderPage(gen, scrollTop, quiet) {
   const main = document.getElementById('main');
+  // The charts on screen now, put back if a background refresh is dropped so hover keeps matching them.
+  const shown = CHARTS.slice();
   if (scrollTop) {
     momentCache.clear();
     // A page that takes a moment says so instead of leaving the last one up.
@@ -788,54 +1551,104 @@ async function renderPage(gen, scrollTop) {
     if (!S.side.ssh && S.page === 'keys') S.page = 'overview';
     renderSide();
     CHARTS.length = 0;
+    renderPage.building = gen; // read synchronously by page builders that hold changes until accepted
     html = S.page === 'overview' ? await pageOverview()
       : S.page === 'findings' ? await pageFindings()
       : S.page === 'keys' ? await pageKeys()
+      : S.page === 'ram' ? await pageRamCleanup()
       : S.page === 'settings' ? await pageSettings()
       : S.machine === 'pc' ? await pagePC() : await pageServer(S.machine);
   } catch (e) {
     if (gen !== renderGen) return;
-    html = head('Something went wrong', '') + `<div class="body"><div class="err">${ic('crit', 'i fi')}<div><div class="t">This page could not load</div><pre>${esc(String(e))}</pre><div class="toolbar"><button class="btn" data-go="overview">Back to Overview</button></div></div></div></div>`;
+    html = head('Something went wrong', '') + `<div class="body"><div class="err">${ic('crit', 'i fi')}<div><div class="t">This page could not load</div><pre>${esc(String(e))}</pre><div class="toolbar"><button class="btn" data-action="retry-page">${ic('refresh')}Try again</button><button class="btn" data-go="overview">Back to Overview</button></div></div></div></div>`;
     CHARTS.length = 0;
   }
-  if (gen !== renderGen) return;
+  if (gen !== renderGen) { pageCommits.delete(gen); return; }
+  if (quiet && holdRefresh(quiet === 'answer')) { CHARTS.length = 0; CHARTS.push(...shown); pageCommits.delete(gen); return; }
+  pageCommits.get(gen)?.(); pageCommits.clear();
   clearTimeout(loadT);
   renderSide();
+  html = pressureBanner() + html;
   const changed = setHTML(main, html);
+  if (changed) { watchHead(main); fitSticky(); }
+  if (pendingFocus) { const el = document.querySelector(pendingFocus); if (el) el.focus(); pendingFocus = null; }
   if (scrollTop) main.scrollTop = 0;
   if (changed) requestAnimationFrame(drawCharts);
   if (!render.shown) { render.shown = true; invoke('ready').then(r => { if (r?.smoke && !r.hold) smokeRun(); }).catch(() => {}); }
 }
 // Live pages refresh every 5 s, unless the user is pointing at a chart, typing, or has a dialog open.
 function quietRefresh() {
-  if (render.busy || S.smoke || document.hidden || S.hovering || document.getElementById('scrim').classList.contains('open')) return;
-  const f = document.activeElement;
-  if (f && (f.tagName === 'SELECT' || f.tagName === 'INPUT') && f.type !== 'checkbox') return;
-  render();
+  if (holdRefresh()) return;
+  const onClean = S.page === 'machine' && S.machine === 'pc' && S.tab === 'cleanup';
+  if (onClean && Date.now() - (quietRefresh.cleanAt || 0) < 15000) return;
+  if (render.busy || S.smoke || document.hidden || document.getElementById('scrim').classList.contains('open')) return;
+  if (onClean) quietRefresh.cleanAt = Date.now();
+  render(false, true);
 }
 setInterval(quietRefresh, 5000);
 
 /* ================= Events ================= */
 document.addEventListener('click', async e => {
-  const t = e.target.closest('button,[data-go],[data-appsel],[data-recsel],[data-pcapp]');
+  const t = e.target.closest('button,[data-go],[data-appsel],[data-recsel],[data-pcapp],[data-gtoggle]');
   if (!t) { if (e.target.id === 'scrim') closeDialog(); return; }
   const ds = t.dataset;
-  if (ds.retry !== undefined) { e.stopPropagation(); await act(invoke('server_retry', { alias: ds.retry }), `Trying ${ds.retry} again`); return setTimeout(render, 1500); }
-  if (ds.watch !== undefined) { e.stopPropagation(); await act(invoke('server_watch', { alias: ds.watch, on: ds.on === '1' })); return render(); }
-  if (ds.recdel !== undefined) { e.stopPropagation(); return dialog('delete', Number(ds.recdel)); }
-  if (ds.go) return go(ds.go, ds.m);
+  // Answers to the user's own click are drawn at once, never held: a held one would leave the row stale
+  // under the pointer that just pressed it.
+  // A keyboard user keeps focus on the button they pressed when its answer redraw lands.
+  const keepFocus = () => { if (t.matches(':focus-visible')) { pendingFocus = selectorOf(t); setTimeout(() => { pendingFocus = null; }, 3000); } };
+  if (ds.retry !== undefined) { e.stopPropagation(); keepFocus(); await act(invoke('server_retry', { alias: ds.retry }), `Trying ${ds.retry} again`); return setTimeout(() => render(false, 'answer'), 1500); }
+  if (ds.watch !== undefined) { e.stopPropagation(); await act(invoke('server_watch', { alias: ds.watch, on: ds.on === '1' }), ds.on === '1' ? `Monitoring ${ds.watch} again` : `Paused monitoring of ${ds.watch}`); return render(); }
+  if (ds.recdel !== undefined) { e.stopPropagation(); return dialog('delete', { id: Number(ds.recdel), label: ds.label || '' }); }
+  if (ds.go) return go(ds.go, ds.m, ds.t);
   if (ds.tab) { S.tab = ds.tab; S.pinned = null; S.sort = S.machine === 'pc' ? 'cpu' : 'mem'; return render(true); }
   if (ds.range) { S.range = Number(ds.range); S.pinned = null; return render(); }
   if (ds.sort) { S.sort = ds.sort; return render(); }
   if (ds.kind) { S.srvKind = ds.kind; return render(); }
   if (ds.recmin !== undefined) { S.recMinutes = Number(ds.recmin); return render(); }
   if (ds.theme) return setTheme(ds.theme, true);
-  if (ds.appsel) { S.appSel = ds.appsel; return render(); }
+  if (ds.appsel) { S.appSel = ds.appsel; await render(); if (matchMedia('(max-width: 1100px)').matches) document.querySelector('#main .sticky-side')?.scrollIntoView({ block: 'start' }); return; }
   if (ds.pcapp) { S.tab = 'history'; S.histApp = ds.pcapp; S.pinned = null; return render(true); }
   if (ds.recsel !== undefined) { S.recSel = ds.recsel ? Number(ds.recsel) : null; return render(); }
   if (ds.record) { S.tab = 'recordings'; S.recApp = ds.record; return render(true); }
-  if (ds.stop) return stopApp(ds.stop, false).then(() => render());
-  if (ds.force) return dialog('force', ds.force);
+  if (ds.stopask) {
+    const n = Number(ds.procs), win = ds.win === '1';
+    // Every Stop asks first: the lists reorder on refresh, so a one-click close could land on another app.
+    // The numbers on the button are from the last drawing, so the dialog reads the live ones first.
+    let live = null, got = false;
+    try { live = ((await invoke('pc_now'))?.apps || []).find(x => x.app === ds.stopask); got = true; } catch {}
+    if (got && !live) { toast(`${ds.label || ds.stopask} is not running any more.`); return render(); }
+    if (live) return dialog('stopapp', { app: ds.stopask, label: ds.label, procs: live.procs, mem: live.mem, win: !!live.titles });
+    return dialog('stopapp', { app: ds.stopask, label: ds.label, procs: n, mem: Number(ds.mem), win });
+  }
+  if (ds.treestop) { const [pid, st] = ds.treestop.split(':').map(Number); const inside = S.grpItems?.get(ds.treestop) || []; return dialog('tree', { targets: [[pid, st]], label: ds.label, procs: Number(ds.procs), mem: Number(ds.mem), items: inside }); }
+  if (ds.showall) { S.showAll.add(ds.showall); return render(); }
+  if (ds.gtoggle) { const g = Number(ds.gtoggle); S.openGroups.has(g) ? S.openGroups.delete(g) : S.openGroups.add(g); return render(); }
+  if (ds.force) {
+    let live = null;
+    try { live = ((await invoke('pc_now'))?.apps || []).find(x => x.app === ds.force); } catch {}
+    return dialog('force', { app: ds.force, procs: live ? live.procs : Number(ds.procs) || 0, mem: live ? live.mem : Number(ds.mem) || 0 });
+  }
+  if (ds.stview) { S.stView = ds.stview; S.stPerm = false; return render(); }
+  if (ds.stsort) { if (S.stSort === ds.stsort) S.stDesc = !S.stDesc; else { S.stSort = ds.stsort; S.stDesc = ds.stsort !== 'name'; } return render(); }
+  if (ds.stbsort) { if (S.stBSort === ds.stbsort) S.stBDesc = !S.stBDesc; else { S.stBSort = ds.stbsort; S.stBDesc = ds.stbsort !== 'name'; } S.stBN = 200; return render(); }
+  if (ds.stfsort) { if (S.stFSort === ds.stfsort) S.stFDesc = !S.stFDesc; else { S.stFSort = ds.stfsort; S.stFDesc = ds.stfsort !== 'name'; } S.stFN = 200; return render(); }
+  if (ds.sttype !== undefined) { S.stType = S.stType === ds.sttype ? '' : ds.sttype; S.stFN = 200; return render(); }
+  if (ds.stmapsel !== undefined) {
+    const path = ds.stmapsel;
+    if (S.stSel.has(path)) S.stSel.delete(path); else S.stSel.set(path, { path, size: Number(ds.size), dir: null, parent: Number(ds.parent) });
+    return render();
+  }
+  if (ds.stdir !== undefined) { S.stDir = Number(ds.stdir); S.stView = 'folders'; return render(); }
+  if (ds.stjopen) { S.stJunkOpen.has(ds.stjopen) ? S.stJunkOpen.delete(ds.stjopen) : S.stJunkOpen.add(ds.stjopen); return render(); }
+  if (ds.stjall) { S.stJunkAll.has(ds.stjall) ? S.stJunkAll.delete(ds.stjall) : S.stJunkAll.add(ds.stjall); return render(); }
+  if (ds.apun) { const a = S.apLast?.apps.find(x => x.id === ds.apun); return a ? dialog('apun', a) : undefined; }
+  if (ds.apdis) { await act(invoke('apps_dismiss', { id: ds.apdis })); return render(); }
+  if (ds.apleft) {
+    const j = S.apLast?.jobs.find(x => x.id === ds.apleft); if (!j) return;
+    const items = j.leftovers.map(x => ({ path: x.path, size: x.size }));
+    return dialog('apleft', { id: j.id, items, size: items.reduce((t, x) => t + x.size, 0) });
+  }
+  if (ds.streveal !== undefined) return act(invoke('storage_reveal', { path: ds.streveal }));
   if (ds.recstop) { await act(invoke('stop_recording', { id: Number(ds.recstop) }), 'Recording saved'); return render(); }
   if (ds.dialog) return dialog(ds.dialog);
   if (t.hasAttribute('data-close')) return closeDialog();
@@ -843,28 +1656,169 @@ document.addEventListener('click', async e => {
   if (t.hasAttribute('data-unpin')) { S.pinned = null; return render(); }
   switch (ds.action) {
     case 'refresh': S.keys = null; S.rescan = S.page === 'settings'; momentCache.clear(); return render();
+    case 'ram-free': {
+      // One pass at a time: a pass takes a moment, and a second click would only repeat it.
+      if (S.ramBusy) return;
+      S.ramBusy = true;
+      render();
+      const r = await act(invoke('ram_free_now'));
+      S.ramBusy = false;
+      if (!r) return render();
+      if (r.freed > 0) {
+        toast(`Freed ${bytes(r.freed)} of RAM from ${r.procs} idle process${r.procs === 1 ? '' : 'es'}. Nothing was closed.`);
+      } else if (!r.recorded) {
+        // Without the recorder there is no history of when anything last did something.
+        toast('The recorder has not been running, so nothing is known to have been idle. Nothing was closed.');
+      } else {
+        toast('Nothing was idle long enough to free right now. Nothing was closed.');
+      }
+      return render();
+    }
     case 'keys-again': S.keys = null; return render();
-    case 'start-recorder': await act(invoke('start_recorder'), 'Recorder started'); return setTimeout(render, 1200);
+    case 'retry-page': return render(true);
+    case 'start-recorder': keepFocus(); await act(invoke('start_recorder'), 'Recorder started'); return setTimeout(() => render(false, 'answer'), 1200);
     case 'rec-start': {
       const app = document.getElementById('recapp')?.value; if (!app) return;
-      await act(invoke('start_recording', { appName: app, minutes: S.recMinutes || null }), `Recording ${app}`);
+      await act(invoke('start_recording', { appName: app, minutes: S.recMinutes || null }), `Recording ${liveName(app)}`);
+      return render();
+    }
+    case 'clean-selected': {
+      const keys = [...S.cleanSel], targets = keys.map(k => k.split(':').map(Number));
+      if (!targets.length) return;
+      // The dialog lists exactly what Stop will end, from the page the user is looking at.
+      const items = keys.map(k => S.cleanInfo?.get(k)).filter(Boolean);
+      const procs = items.reduce((t, x) => t + x.procs, 0), mem = items.reduce((t, x) => t + x.mem, 0);
+      return dialog('tree', { targets, items, label: `${targets.length} selected item${targets.length === 1 ? '' : 's'}`, procs: items.length === targets.length ? procs : null, mem, reason: 'Suggested clean-up' });
+    }
+    case 'st-scan': {
+      const root = document.getElementById('stroot')?.value || S.stRoot;
+      S.stRoot = root; S.stSel.clear(); S.stPerm = false; S.stJunk.clear(); S.stDir = 0; S.stDupN = 100;
+      await act(invoke('storage_scan', { root }));
+      return render();
+    }
+    case 'st-open': {
+      const root = document.getElementById('stroot')?.value || S.stRoot;
+      S.stRoot = root; S.stSel.clear(); S.stPerm = false; S.stJunk.clear(); S.stDir = 0; S.stDupN = 100;
+      toast('Opening saved results…');
+      await act(invoke('storage_open_saved', { root }), 'Saved results opened.');
+      return render();
+    }
+    case 'st-cancel': await act(invoke('storage_cancel')); return setTimeout(render, 300);
+    case 'st-clear': S.stSel.clear(); S.stPerm = false; return render();
+    case 'st-more': S.stDupN += 100; return render();
+    case 'st-fmore': S.stFN += 500; return render();
+    case 'st-bmore': S.stBN += 300; return render();
+    case 'st-restore': return act(invoke('storage_restore_points'));
+    case 'st-delete': {
+      const items = stSelected(); if (!items.length) return;
+      return dialog('stdelete', { items, size: items.reduce((t, x) => t + x.size, 0), perm: S.stPerm });
+    }
+    case 'st-clean': {
+      const junk = stJunkList(S.stLast).filter(j => S.stJunk.has(j.id)); if (!junk.length) return;
+      return dialog('stclean', { ids: junk.map(j => j.id), labels: junk.map(j => j.label), size: junk.reduce((t, j) => t + j.size, 0), open: junk.filter(j => j.running).map(j => j.running), slow: junk.filter(j => !j.rec).map(j => j.label) });
+    }
+    case 'st-clean-cancel': await act(invoke('storage_clean_cancel')); return render();
+    case 'st-clean-ok': S.stCleanMsg = null; return render();
+    case 'st-remeasure': await act(invoke('storage_remeasure')); return render();
+    case 'st-selrec': {
+      const rec = stJunkList(S.stLast).filter(j => j.rec);
+      if (rec.every(j => S.stJunk.has(j.id))) S.stJunk.clear(); else for (const j of rec) S.stJunk.add(j.id);
+      return render();
+    }
+    case 'st-dl-setup': case 'st-dl-all': {
+      for (const x of S.stDlLast?.items || []) if (ds.action === 'st-dl-all' || x.setup) S.stSel.set(x.path, { path: x.path, size: x.size, dir: null, parent: null });
+      return render();
+    }
+    case 'st-dl-more': S.stDlN += 100; return render();
+    case 'st-build-old': {
+      const cut = nowS() - S.stBuildDays * 86400;
+      for (const b of (S.stLast?.result?.builds || []).slice(0, 200)) if (b.project < cut) S.stSel.set(b.path, { path: b.path, size: b.size, dir: b.id, parent: null });
+      return render();
+    }
+    case 'ap-all': S.apAll = !S.apAll; return render();
+    case 'ap-rescan': await act(invoke('apps_rescan')); return render();
+    case 'st-bin': return dialog('stbin', S.stLast?.bin || { items: 0, size: 0 });
+    case 'st-winset': return act(invoke('storage_windows_settings'));
+    case 'st-dup-newest': case 'st-dup-oldest': {
+      const newest = ds.action === 'st-dup-newest';
+      for (const g of (S.stLast?.result?.dups || []).slice(0, S.stDupN)) {
+        const keep = g.files.reduce((a, b) => (newest ? b.modified > a.modified : b.modified < a.modified) ? b : a);
+        for (const f of g.files) { if (f === keep) S.stSel.delete(f.path); else S.stSel.set(f.path, { path: f.path, size: f.size, parent: f.parent }); }
+      }
       return render();
     }
     case 'check': S.update = await act(invoke('check_update')) || S.update; pollUpdate(); return render();
+    case 'update-refresh': S.update = await act(invoke('refresh_update')) || S.update; pollUpdate(); return render();
     case 'install': return installUpdate();
   }
 });
 document.addEventListener('change', async e => {
   const t = e.target;
   if (t.id === 'ssh-toggle') { await act(invoke('set_ssh', { on: t.checked }), t.checked ? 'Servers over SSH are on' : 'Servers over SSH are off'); S.keys = null; return render(); }
+  if (t.id === 'usegh') { await act(invoke('set_use_gh', { on: t.checked }), t.checked ? 'Update checks will use the GitHub CLI' : 'Update checks no longer use the GitHub CLI'); S.gh = null; return render(); }
   if (t.id === 'autostart') { await act(invoke('set_autostart', { on: t.checked })); return render(); }
-  if (t.id === 'retention') { await act(invoke('set_retention', { days: Number(t.value) }), `History is kept for ${t.value} days`); t.blur(); return render(); }
+  if (t.id === 'retention') {
+    const days = Number(t.value);
+    if (days < Number(t.dataset.was)) return dialog('keep', { days });
+    await act(invoke('set_retention', { days }), `History is kept for ${days} days`); t.blur(); return render();
+  }
   if (t.dataset.host) { await act(invoke('server_watch', { alias: t.dataset.host, on: t.checked })); return render(); }
   if (t.id === 'ffilter') { S.filter = t.value; t.blur(); return render(); }
   if (t.id === 'histapp') { S.histApp = t.value; S.pinned = null; t.blur(); return render(); }
   if (t.id === 'recapp') { S.recApp = t.value; t.blur(); }
+  if (t.dataset.stsel !== undefined) {
+    const path = t.dataset.stsel;
+    if (t.checked && t.dataset.group !== undefined && [...document.querySelectorAll(`[data-group="${t.dataset.group}"]`)].every(b => b.checked)) {
+      t.checked = false; return toast('Keep at least one copy. Every copy of this file was selected.', true);
+    }
+    if (t.checked) S.stSel.set(path, { path, size: Number(t.dataset.size), dir: t.dataset.dir != null ? Number(t.dataset.dir) : null, parent: t.dataset.parent != null ? Number(t.dataset.parent) : null });
+    else S.stSel.delete(path);
+    return render();
+  }
+  if (t.dataset.jsel) { t.checked ? S.stJunk.add(t.dataset.jsel) : S.stJunk.delete(t.dataset.jsel); return render(); }
+  if (t.id === 'stperm') { S.stPerm = t.checked; return render(); }
+  if (t.id === 'stroot') { S.stRoot = t.value; S.stSel.clear(); S.stPerm = false; t.blur(); return render(); }
+  if (t.id === 'stdldays') { S.stDlDays = Number(t.value); S.stDlN = 50; t.blur(); return render(); }
+  if (t.id === 'stbdays') { S.stBuildDays = Number(t.value); t.blur(); return render(); }
+  if (t.dataset.csel) {
+    const k = t.dataset.csel;
+    t.checked ? S.cleanSel.add(k) : S.cleanSel.delete(k); quietRefresh.cleanAt = 0;
+    // The redraw replaces the checkbox; keep keyboard focus on it.
+    await render();
+    // Only when focus was lost with the old checkbox, not after the user moved on.
+    if (document.activeElement === document.body || !document.activeElement) document.querySelector(`[data-csel="${k}"]`)?.focus();
+    return;
+  }
+  if (t.id === 'autoclean') { await act(invoke('set_auto_cleanup', { on: t.checked, minutes: null }), t.checked ? 'Idle shells left over from closed apps will be stopped automatically' : 'Automatic clean-up is off'); quietRefresh.cleanAt = 0; return render(); }
+  if (t.id === 'ramclean') { await act(invoke('set_ram_clean', { on: t.checked, pct: null }), t.checked ? 'Idle apps are freed from RAM when memory runs low' : 'The RAM cleaner is off'); quietRefresh.cleanAt = 0; return render(); }
+  if (t.id === 'rampct') { await act(invoke('set_ram_clean', { on: !!document.getElementById('ramclean')?.checked, pct: Number(t.value) })); t.blur(); quietRefresh.cleanAt = 0; return render(); }
+  if (t.id === 'automin') { await act(invoke('set_auto_cleanup', { on: !!document.getElementById('autoclean')?.checked, minutes: Number(t.value) })); t.blur(); quietRefresh.cleanAt = 0; return render(); }
 });
-addEventListener('keydown', e => { if (e.key === 'Escape' && pendingDialog) closeDialog(); });
+let runT;
+document.addEventListener('input', e => {
+  const id = e.target.id;
+  if (id !== 'runq' && id !== 'apq' && id !== 'stfq') return;
+  if (id === 'apq') S.apQ = e.target.value; else if (id === 'stfq') { S.stFQ = e.target.value; S.stFN = 200; } else S.runQuery = e.target.value;
+  const ss = e.target.selectionStart, se = e.target.selectionEnd;
+  clearTimeout(runT);
+  runT = setTimeout(async () => { await render(); const el = document.getElementById(id); if (el) { el.focus(); const n = el.value.length; el.setSelectionRange(Math.min(ss ?? n, n), Math.min(se ?? n, n)); } }, 150);
+});
+addEventListener('keydown', e => {
+  if (e.key === 'Escape' && pendingDialog) closeDialog();
+  if (e.key === 'Tab' && pendingDialog) {
+    const f = [...document.querySelectorAll('#dialog button:not([disabled]), #dialog input, #dialog select')];
+    const i = f.indexOf(document.activeElement);
+    if (f.length && e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); }
+    else if (f.length && !e.shiftKey && (i === f.length - 1 || i === -1)) { e.preventDefault(); f[0].focus(); }
+  }
+  // Rows that open something respond to Enter and Space like a button.
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches?.('tr[data-go],tr[data-gtoggle],tr[data-pcapp],tr[data-appsel],tr[data-recsel]')) {
+    e.preventDefault();
+    e.target.click();
+    pendingFocus = selectorOf(e.target);
+    setTimeout(() => { pendingFocus = null; }, 3000);
+  }
+});
 
 /* ================= Theme and updates ================= */
 const mq = matchMedia('(prefers-color-scheme: dark)');
@@ -882,22 +1836,36 @@ mq.addEventListener('change', () => { applyTheme(S.theme); document.getElementBy
 let rt; addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(drawCharts, 80); });
 
 let updT;
+let openerFocus = null;
+let pendingFocus = null;
+// A selector for an element, from its id and data attributes, so it can be found again after a redraw.
+function selectorOf(el) {
+  if (!el || !el.tagName || el === document.body) return null;
+  const attrs = [...el.attributes].filter(a => a.name === 'id' || a.name.startsWith('data-')).map(a => `[${a.name}="${CSS.escape(a.value)}"]`).join('');
+  return attrs ? el.tagName.toLowerCase() + attrs : null;
+}
 async function pollUpdate() {
   clearTimeout(updT);
+  const before = JSON.stringify(S.update);
   try { S.update = await invoke('update_state'); } catch { /* keep the last state */ }
   if (['up_to_date', 'available'].includes(S.update.state)) S.checkedAt = Date.now() / 1000;
   renderSide();
   if (['checking', 'downloading', 'restarting'].includes(S.update.state)) updT = setTimeout(pollUpdate, 800);
-  else if (S.page === 'settings') render();
+  // Redraw Settings only when the update state changed, so a 15-second check does not reset an open menu.
+  else if (S.page === 'settings' && JSON.stringify(S.update) !== before && !['SELECT', 'INPUT'].includes(document.activeElement?.tagName)) render();
 }
 async function checkUpdates() { try { S.update = await invoke('check_update'); } catch { } pollUpdate(); }
+
+// Asks GitHub when the app opens and every 2 hours. GitHub allows 60 unsigned requests an hour per connection,
+// and a "nothing new" reply counts too, so checks stay rare. Refresh in Settings checks right away.
+const UPDATE_EVERY_MS = 2 * 60 * 60 * 1000;
 
 (async function start() {
   try { const st = await invoke('settings'); S.theme = st.theme; } catch { }
   applyTheme(S.theme);
   await render();
   checkUpdates();
-  setInterval(checkUpdates, 30 * 60 * 1000);
+  setInterval(checkUpdates, UPDATE_EVERY_MS);
 })();
 
 /* ================= Smoke run (--smoke) ================= */
@@ -933,7 +1901,8 @@ async function smokeRun() {
   };
   await visit('overview', { page: 'overview', machine: null });
   await visit('findings', { page: 'findings', machine: null, range: 604800 });
-  for (const tab of ['now', 'history', 'apps', 'running', 'recordings', 'insights']) await visit('pc ' + tab, { page: 'machine', machine: 'pc', tab, range: 86400 });
+  await visit('ram', { page: 'ram', machine: null });
+  for (const tab of ['now', 'cleanup', 'storage', 'history', 'apps', 'running', 'recordings', 'insights']) await visit('pc ' + tab, { page: 'machine', machine: 'pc', tab, range: 86400 });
   const app = (S.pcHead?.apps || [])[0]?.app;
   if (app) await visit('pc history ' + app, { page: 'machine', machine: 'pc', tab: 'history', histApp: app });
   await visit('pc history pinned', { page: 'machine', machine: 'pc', tab: 'history', histApp: '', range: 21600 });

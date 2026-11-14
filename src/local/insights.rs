@@ -18,14 +18,39 @@ pub struct Insight {
     pub detail: String,
     /// Optional moment the finding points at.
     pub at: Option<i64>,
+    /// What to do about it, in one sentence.
+    pub action: Option<String>,
+    /// An app (exe name) the user may want to stop, if it is still running.
+    pub app: Option<String>,
 }
 
 const SPIKE_CPU: f64 = 85.0;
 const SPIKE_MIN_SECS: i64 = 60;
 const MEM_PRESSURE: f64 = 90.0;
+const COMMIT_PRESSURE: f64 = 90.0;
 
+/// Insights cover a stretch of time, so a shared runtime is named by its program file, not its last window.
 fn name(app: &str, desc: &Option<String>) -> String {
-    describe::display_name(app, desc.as_deref())
+    describe::summary_name(app, desc.as_deref())
+}
+
+/// What the app is, as trailing sentences. Leading sentences that only repeat the name are dropped
+/// ("Google Chrome. Each tab..." becomes "Each tab..."), the same rule the window uses under app names.
+fn about(app: &str, desc: &Option<String>) -> String {
+    let ex = describe::summary_explain(app, desc.as_deref());
+    let shown = name(app, desc).to_lowercase();
+    let mut rest = ex.trim();
+    loop {
+        // A sentence ends at ". " followed by a capital letter.
+        let cut = rest.match_indices(". ").find(|(i, _)| rest[i + 2..].starts_with(|c: char| c.is_uppercase())).map(|(i, _)| i);
+        let first = cut.map_or(rest, |i| &rest[..i]).trim_end_matches('.').trim().to_lowercase();
+        let repeats = !first.is_empty() && (shown.contains(&first) || (first.contains(&shown) && first.len() <= shown.len() + 12));
+        if !repeats {
+            break;
+        }
+        rest = cut.map_or("", |i| rest[i + 2..].trim());
+    }
+    if rest.is_empty() { String::new() } else { format!(" {rest}") }
 }
 
 fn culprits(conn: &Connection, from: i64, to: i64) -> String {
@@ -87,6 +112,8 @@ pub fn compute(conn: &Connection, from: i64, to: i64) -> db::Result<Vec<Insight>
             title: "No data for this time range yet".into(),
             detail: "Background tracking records a sample every few seconds. Leave it running and come back later.".into(),
             at: None,
+            action: None,
+            app: None,
         });
         return Ok(out);
     };
@@ -105,6 +132,8 @@ pub fn compute(conn: &Connection, from: i64, to: i64) -> db::Result<Vec<Insight>
             fmt::day_time(last)
         ),
         at: None,
+        action: None,
+        app: None,
     });
 
     // Busiest hour.
@@ -121,6 +150,8 @@ pub fn compute(conn: &Connection, from: i64, to: i64) -> db::Result<Vec<Insight>
                 format!("Peak sample reached {}. Most CPU went to {who}.", fmt::pct(h.cpu_max))
             },
             at: Some(h.ts),
+            action: None,
+            app: None,
         });
     }
 
@@ -137,13 +168,15 @@ pub fn compute(conn: &Connection, from: i64, to: i64) -> db::Result<Vec<Insight>
                     100.0 * a.cpu_load / total_load.max(f64::EPSILON)
                 ),
                 detail: format!(
-                    "It averaged {} of your CPU over {} of activity and peaked at {}. {}",
+                    "It averaged {} of your CPU over {} of activity and peaked at {}.{}",
                     fmt::pct(a.cpu_avg),
                     fmt::duration(a.minutes * 60),
                     fmt::pct(a.cpu_peak),
-                    describe::explain(&a.app, a.description.as_deref())
+                    about(&a.app, &a.description)
                 ),
                 at: None,
+                action: None,
+                app: None,
             });
         }
     }
@@ -152,11 +185,13 @@ pub fn compute(conn: &Connection, from: i64, to: i64) -> db::Result<Vec<Insight>
             severity: Severity::Info,
             title: format!("{} used the most memory ({} on average)", name(&a.app, &a.description), fmt::bytes(a.mem_avg)),
             detail: format!(
-                "Its peak was {}. {}",
+                "Its peak was {}.{}",
                 fmt::bytes(a.mem_peak as f64),
-                describe::explain(&a.app, a.description.as_deref())
+                about(&a.app, &a.description)
             ),
             at: None,
+            action: None,
+            app: None,
         });
     }
     if let Some(a) = apps.iter().max_by_key(|x| x.io_total) {
@@ -166,6 +201,8 @@ pub fn compute(conn: &Connection, from: i64, to: i64) -> db::Result<Vec<Insight>
                 title: format!("{} read and wrote the most data ({})", name(&a.app, &a.description), fmt::bytes(a.io_total as f64)),
                 detail: "This counts disk and other file I/O. Heavy I/O can make a PC with a hard drive feel slow.".into(),
                 at: None,
+                action: None,
+                app: None,
             });
         }
     }
@@ -184,11 +221,14 @@ pub fn compute(conn: &Connection, from: i64, to: i64) -> db::Result<Vec<Insight>
             ),
             detail: "When the CPU stays this high, apps respond slowly. The longest ones are listed below.".into(),
             at: None,
+            action: None,
+            app: None,
         });
         let mut longest = spikes.clone();
         longest.sort_by_key(|(s, e, _)| -(e - s));
         for (s, e, peak) in longest.into_iter().take(3) {
             let who = culprits(conn, s, e);
+            let top = db::top_apps_in(conn, s - s.rem_euclid(60), e, 1).unwrap_or_default().into_iter().next();
             out.push(Insight {
                 severity: Severity::Warning,
                 title: format!("High CPU for {} starting {}", fmt::duration(e - s), fmt::day_time(s)),
@@ -198,6 +238,8 @@ pub fn compute(conn: &Connection, from: i64, to: i64) -> db::Result<Vec<Insight>
                     format!("Peaked at {}. Caused mostly by {who}.", fmt::pct(peak))
                 },
                 at: Some(s),
+                action: top.as_ref().map(|(a, d, _)| format!("If {} is still busy and you are not using it, stop it. To see exactly when it gets busy, record it from Recordings.", name(a, d))),
+                app: top.map(|(a, _, _)| a),
             });
         }
     }
@@ -208,8 +250,8 @@ pub fn compute(conn: &Connection, from: i64, to: i64) -> db::Result<Vec<Insight>
         let total: i64 = pressure.iter().map(|(s, e, _)| e - s).sum();
         let (s, e, _) = *pressure.iter().max_by_key(|(s, e, _)| e - s).unwrap();
         let from_m = s - s.rem_euclid(60);
-        let who = db::top_mem_apps_in(conn, from_m, e, 3)
-            .unwrap_or_default()
+        let top_mem = db::top_mem_apps_in(conn, from_m, e, 3).unwrap_or_default();
+        let who = top_mem
             .iter()
             .map(|(a, d, m)| format!("{} ({})", name(a, d), fmt::bytes(*m)))
             .collect::<Vec<_>>()
@@ -223,6 +265,40 @@ pub fn compute(conn: &Connection, from: i64, to: i64) -> db::Result<Vec<Insight>
                 if who.is_empty() { String::new() } else { format!(", when the biggest users were {who}") }
             ),
             at: Some(s),
+            action: Some(format!(
+                "Close apps you are not using{}. Clean up also lists helpers left running by apps that already closed.",
+                top_mem.first().map(|(a, d, _)| format!(", starting with {}", name(a, d))).unwrap_or_default()
+            )),
+            app: top_mem.first().map(|(a, _, _)| a.clone()),
+        });
+    }
+
+    // Committed memory near the limit: apps crash or refuse to start even if RAM looks free.
+    let commit = runs(&raw, 60, |p| p.commit_pct >= COMMIT_PRESSURE, |p| p.commit_pct);
+    if !commit.is_empty() {
+        let total: i64 = commit.iter().map(|(s, e, _)| e - s).sum();
+        let (s, _, peak) = *commit.iter().max_by_key(|(s, e, _)| e - s).unwrap();
+        let mut live = db::live_apps(conn).unwrap_or_default();
+        live.retain(|r| !super::procs::is_protected(&r.app, r.exe_path.as_deref()));
+        live.sort_by(|a, b| b.private.cmp(&a.private));
+        let who = live
+            .iter()
+            .take(3)
+            .filter(|r| r.private > 0)
+            .map(|r| format!("{} ({})", name(&r.app, &r.description), fmt::bytes(r.private as f64)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push(Insight {
+            severity: Severity::Critical,
+            title: format!("Committed memory was over {COMMIT_PRESSURE:.0}% of the limit for {}", fmt::duration(total)),
+            detail: format!(
+                "Windows had promised programs almost all of its RAM plus page file (peak {}). When that runs out, apps freeze, crash or will not open, even if Task Manager shows free memory.{}",
+                fmt::pct(peak),
+                if who.is_empty() { String::new() } else { format!(" Promised the most right now: {who}.") }
+            ),
+            at: Some(s),
+            action: Some("Close the apps that hold the most, or let Windows grow the page file: Settings > System > About > Advanced system settings > Performance Settings > Advanced > Virtual memory > Change, then pick System managed size.".into()),
+            app: live.first().filter(|r| r.private > 0).map(|r| r.app.clone()),
         });
     }
 
@@ -249,6 +325,8 @@ pub fn compute(conn: &Connection, from: i64, to: i64) -> db::Result<Vec<Insight>
                 title: format!("Your PC is usually busiest around {h:02}:00"),
                 detail: format!("CPU averages {} in that hour across the days recorded.", fmt::pct(sum / *n as f64)),
                 at: None,
+                action: None,
+                app: None,
             });
         }
     }

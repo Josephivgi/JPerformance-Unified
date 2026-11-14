@@ -110,21 +110,55 @@ pub fn file_description(path: &Path) -> Option<String> {
 /// Friendly name for display: file description if known, otherwise the process name.
 pub fn display_name(app: &str, description: Option<&str>) -> String {
     match description {
-        Some(d) if !d.is_empty() && !d.eq_ignore_ascii_case(app) => d.to_string(),
+        Some(d) if !d.is_empty() && !d.eq_ignore_ascii_case(app) && !names_only_runtime(app, d) => d.to_string(),
         _ => app.to_string(),
     }
 }
 
-/// One-line explanation shown under an app's name.
+/// Programs built with a runtime (Bun, Node, Electron...) often keep that runtime's description,
+/// so droid.exe says "Bun". Such a description names the runtime, not the program.
+pub fn names_only_runtime(app: &str, d: &str) -> bool {
+    let d = d.trim().to_ascii_lowercase();
+    let stem = app.to_ascii_lowercase();
+    let stem = stem.trim_end_matches(".exe");
+    let rt = matches!(d.as_str(), "bun" | "deno" | "node.js" | "node.js javascript runtime" | "electron" | "python" | "pythonw"
+        | "java(tm) platform se binary" | "openjdk platform binary" | "java" | "javaw" | "nw.js" | "chromium"
+        | "microsoft edge webview2" | "tauri app" | "cefsharp.browsersubprocess" | "qtwebengineprocess");
+    // A shared runtime's own blurb (node.exe: "Node.js JavaScript Runtime") is not a name either.
+    rt && (!d.starts_with(stem) || is_runtime(app))
+}
+
+/// Shared runtimes run many different apps under one program file. Their recorded name is the last
+/// window title seen, which is fine for "right now" but wrong for a total over a time range.
+pub fn is_runtime(app: &str) -> bool {
+    let stem = app.to_ascii_lowercase();
+    let stem = stem.trim_end_matches(".exe");
+    matches!(stem, "electron" | "java" | "javaw" | "python" | "pythonw" | "node" | "nw" | "msedgewebview2" | "qtwebengineprocess" | "cefsharp.browsersubprocess")
+}
+
+/// Name for a total over a time range: a runtime is named by its program file, others by their description.
+/// No ".exe", so it matches what the window shows.
+pub fn summary_name(app: &str, description: Option<&str>) -> String {
+    let n = if is_runtime(app) { app.to_string() } else { display_name(app, description) };
+    let lower = n.to_ascii_lowercase();
+    if lower.ends_with(".exe") { n[..n.len() - 4].to_string() } else { n }
+}
+
+/// Explanation for a total over a time range. A runtime's recorded description is a window title,
+/// not what the program is, so only the built-in text is used for it.
+pub fn summary_explain(app: &str, description: Option<&str>) -> String {
+    explain(app, if is_runtime(app) { None } else { description })
+}
+
+/// One-line explanation shown under an app's name. Empty when there is nothing to say beyond
+/// the program file name, which the window already shows next to it.
 pub fn explain(app: &str, description: Option<&str>) -> String {
     if let Some(k) = known(app) {
         return k.to_string();
     }
     let stem = app.trim_end_matches(".exe").trim_end_matches(".EXE");
     match description {
-        Some(d) if !d.is_empty() && !d.eq_ignore_ascii_case(stem) && !d.eq_ignore_ascii_case(app) => {
-            format!("{d}. Program file: {app}.")
-        }
-        _ => format!("Program file: {app}. It has no description of what it does."),
+        Some(d) if !d.is_empty() && !d.eq_ignore_ascii_case(stem) && !d.eq_ignore_ascii_case(app) && !names_only_runtime(app, d) => format!("{}.", d.trim_end_matches('.')),
+        _ => String::new(),
     }
 }

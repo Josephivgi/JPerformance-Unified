@@ -8,7 +8,10 @@ It replaces JPerformance (this PC) and JServer (servers over SSH). On first star
 
 - **Overview**: every machine in one table, with CPU for the last hour, memory, the fullest disk, network and what uses the most memory.
 - **Findings**: worst first, for example "Memory was over 90% full for 45 min" and which apps were behind it.
-- **This PC**: live readings, history charts you can hover and pin, the apps that cost the most, running apps you can stop, one-app recordings every second, and a weekday by hour heatmap.
+- **This PC**: live readings including committed memory (RAM plus page file), history charts you can hover and pin, the apps that cost the most, running apps you can find and stop, one-app recordings every second, and a weekday by hour heatmap.
+- **Clean up**: every app with everything it started (agent sessions, node and python helpers, shells), so one session can be stopped without touching others with the same name. Suggests helpers left running after their app closed and idle agent sessions. Optional automatic clean-up of small idle leftovers, off by default.
+- **RAM Auto Cleanup**: what the background RAM cleaner did, pass by pass (memory in use before and after, which apps it emptied, how much moved out of RAM), and the memory leaks it found: apps whose memory kept climbing for hours while doing little and never came back down, with how fast they grew and how much of it the cleaner has already freed.
+- **Slow right now**: a bar on every page when the CPU, memory or commit charge is under pressure, naming the apps behind it.
 - **Servers**: live readings, where the memory goes (programs, ZFS cache, file cache), processes grouped by VM, container or systemd service, disks, history and findings.
 - **SSH keys**: checks your keys and SSH config.
 
@@ -18,7 +21,7 @@ Servers are off until you turn them on in Settings. Then JPerformance reads `~/.
 
 - runs read-only commands only (`/proc`, `/sys`, `df`, `docker ps`, `qm list`) and installs nothing,
 - never asks for a password and never accepts a new or changed host key,
-- does not retry a failed login on its own, so fail2ban will not ban you. Press Retry when the server is back.
+- does not retry a rejected key or host key on its own, so fail2ban will not ban you. Network drops (timeouts, reboots) are retried on their own after 30 s, then up to every 10 minutes.
 
 ## Install
 
@@ -33,6 +36,9 @@ A small recorder process (`JPerformanceUnified.exe --collector`) keeps recording
 ```
 JPerformanceUnified.exe --report [hours]   findings for this PC and every server
 JPerformanceUnified.exe --probe <host>     log in to one SSH host once and print what it sees
+JPerformanceUnified.exe --processes        print every app with what it started, and clean-up suggestions
+JPerformanceUnified.exe --free-ram [min]   free the memory of apps idle for this many minutes now (nothing is closed)
+JPerformanceUnified.exe --leaks            look for memory leaks and print them, with the RAM cleaner's passes
 JPerformanceUnified.exe --check-update     check GitHub for a newer version
 JPerformanceUnified.exe --update           install the newer version
 ```

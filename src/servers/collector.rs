@@ -115,17 +115,40 @@ fn now_f() -> f64 {
 /// an unreachable host will not fix itself, and retrying a rejected key over
 /// and over can get you banned by fail2ban.
 fn wait_for_retry(conn: &rusqlite::Connection, alias: &str, stop: &AtomicBool, retry: &AtomicI64) -> bool {
+    wait_until(conn, alias, stop, retry, None)
+}
+
+/// Waits for Retry, or until `limit` has passed. False when stopped.
+fn wait_until(conn: &rusqlite::Connection, alias: &str, stop: &AtomicBool, retry: &AtomicI64, limit: Option<Duration>) -> bool {
     let all = retry.load(Ordering::SeqCst);
     let mine = db::server_retry(conn, alias);
+    let start = Instant::now();
     loop {
         if stop.load(Ordering::SeqCst) {
             return false;
         }
-        if retry.load(Ordering::SeqCst) != all || db::server_retry(conn, alias) != mine {
+        if retry.load(Ordering::SeqCst) != all || db::server_retry(conn, alias) != mine || limit.is_some_and(|l| start.elapsed() >= l) {
             return true;
         }
         std::thread::sleep(Duration::from_millis(500));
     }
+}
+
+/// Network trouble that fixes itself (Wi-Fi dropped, server rebooting). Failures before
+/// the login is even tried, so trying again cannot count as a failed login for fail2ban.
+fn transient(status: &str) -> bool {
+    matches!(status, "timeout" | "lost" | "down" | "dns" | "refused")
+}
+
+/// How long to wait before trying again on its own: 30 s, 1, 2, 5, then every 10 minutes.
+fn backoff(tries: u32) -> Duration {
+    Duration::from_secs(match tries {
+        0 => 30,
+        1 => 60,
+        2 => 120,
+        3 => 300,
+        _ => 600,
+    })
 }
 
 #[derive(Default)]
@@ -148,6 +171,8 @@ fn worker(alias: &str, stop: &AtomicBool, retry: &AtomicI64) {
     };
     // A connection that was working and dropped gets one reconnect straight away.
     let mut reconnect = false;
+    // Automatic tries since the last good connection, for the growing wait.
+    let mut tries = 0u32;
     while !stop.load(Ordering::SeqCst) {
         let _ = db::set_status(&conn, alias, "connecting", "Connecting", "", now());
         let login = Session::connect(alias, probe::SETUP).and_then(|(mut s, _, ms)| {
@@ -157,15 +182,27 @@ fn worker(alias: &str, stop: &AtomicBool, retry: &AtomicI64) {
         let (mut session, login_ms, info) = match login {
             Ok(v) => v,
             Err(f) => {
+                reconnect = false;
+                if transient(f.status) {
+                    let wait = backoff(tries);
+                    tries += 1;
+                    let detail = format!("{} Trying again on its own in {}.", f.detail, crate::fmt::duration(wait.as_secs() as i64));
+                    let _ = db::set_status(&conn, alias, f.status, f.label, detail.trim(), now());
+                    log(&format!("{alias}: {} ({}), trying again in {} s", f.label, f.detail, wait.as_secs()));
+                    if !wait_until(&conn, alias, stop, retry, Some(wait)) {
+                        break;
+                    }
+                    continue;
+                }
                 let _ = db::set_status(&conn, alias, f.status, f.label, &f.detail, now());
                 log(&format!("{alias}: {} ({}), waiting for Retry", f.label, f.detail));
-                reconnect = false;
                 if !wait_for_retry(&conn, alias, stop, retry) {
                     break;
                 }
                 continue;
             }
         };
+        tries = 0;
         let _ = db::set_connected(&conn, alias, &info, login_ms, now());
         log(&format!("{alias}: connected in {login_ms} ms ({}, {} cores){}", info.os, info.cores, if reconnect { " after the connection dropped" } else { "" }));
         match monitor(alias, &mut conn, &mut session, info, stop) {
@@ -175,9 +212,11 @@ fn worker(alias: &str, stop: &AtomicBool, retry: &AtomicI64) {
                 log(&format!("{alias}: {} during monitoring ({})", f.label, f.detail));
                 drop(session);
                 if reconnect {
-                    // It dropped again right after reconnecting: stop and wait for Retry.
+                    // It dropped again right after reconnecting: wait a while (network trouble) or for Retry.
                     reconnect = false;
-                    if !wait_for_retry(&conn, alias, stop, retry) {
+                    let limit = transient(f.status).then(|| backoff(tries));
+                    tries += 1;
+                    if !wait_until(&conn, alias, stop, retry, limit) {
                         break;
                     }
                 } else {
