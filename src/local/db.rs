@@ -538,7 +538,7 @@ pub fn log_ram_item(conn: &Connection, run_id: i64, ts: i64, name: &str, procs: 
 /// What the RAM cleaner freed per app, biggest first: (app, bytes, times, when last).
 pub fn ram_freed_by_app(conn: &Connection, since: i64) -> Result<Vec<(String, i64, i64, i64)>> {
     let mut stmt = conn.prepare(
-        "SELECT name, SUM(mem), COUNT(*), MAX(ts) FROM cleanup_log WHERE reason = ?1 AND ts >= ?2 GROUP BY name ORDER BY SUM(mem) DESC LIMIT 40",
+        "SELECT name, SUM(mem), COUNT(*), MAX(ts) FROM cleanup_log WHERE reason = ?1 AND ts >= ?2 GROUP BY name ORDER BY SUM(mem) DESC LIMIT 200",
     )?;
     let rows = stmt.query_map(params![RAM_CLEAN_REASON, since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
     rows.collect()
@@ -549,10 +549,10 @@ pub fn ram_freed_by_app(conn: &Connection, since: i64) -> Result<Vec<(String, i6
 pub struct Leak {
     pub app: String,
     pub name: String,
-    /// When it was first found and when it was last seen growing.
+    /// When this climb started, and the last reading that was still climbing.
     pub first_ts: i64,
     pub last_ts: i64,
-    /// Memory it had when it was first seen growing, and the most it reached.
+    /// Memory it had when this climb started, and the most it has reached since.
     pub from_mem: i64,
     pub peak_mem: i64,
     /// Bytes an hour it was gaining, and how long it was watched.
@@ -582,7 +582,8 @@ pub struct LeakRow {
     pub series: String,
 }
 
-/// Writes a leak found again, keeping the first time it was seen and the most it has reached.
+/// Writes the climb the detector found. A row always describes the climb happening now: when it started,
+/// where it started, the most it has reached, and its series, so nothing on the page mixes two of them.
 pub fn upsert_leak(conn: &Connection, l: &LeakRow) -> Result<()> {
     conn.execute(
         "INSERT INTO leak_finds(app, first_ts, last_ts, gone_ts, from_mem, peak_mem, rate, hours, cpu, series, resolved)
@@ -612,11 +613,11 @@ pub fn unresolved_leaks(conn: &Connection) -> Result<Vec<String>> {
 pub fn leaks(conn: &Connection, since: i64) -> Result<Vec<Leak>> {
     let mut stmt = conn.prepare(
         "SELECT l.app, l.first_ts, l.last_ts, l.from_mem, l.peak_mem, l.rate, l.hours, l.cpu, l.series, l.resolved, l.gone_ts,
-                (SELECT MAX(ts) FROM cleanup_log WHERE reason = ?1 AND name = l.app AND ts >= ?2),
-                (SELECT COALESCE(SUM(mem), 0) FROM cleanup_log WHERE reason = ?1 AND name = l.app AND ts >= ?2)
-         FROM leak_finds l ORDER BY l.resolved, l.rate DESC",
+                (SELECT MAX(ts) FROM cleanup_log WHERE reason = ?1 AND name = l.app AND ts >= MAX(?2, l.first_ts)),
+                (SELECT COALESCE(SUM(mem), 0) FROM cleanup_log WHERE reason = ?1 AND name = l.app AND ts >= MAX(?2, l.first_ts))
+         FROM leak_finds l ORDER BY l.resolved",
     )?;
-    let rows = stmt.query_map(params![RAM_CLEAN_REASON, since], |r| {
+    let mut out: Vec<Leak> = stmt.query_map(params![RAM_CLEAN_REASON, since], |r| {
         let series: Option<String> = r.get(8)?;
         // The page names each app from its description; this is the program file until it does.
         let app: String = r.get(0)?;
@@ -640,8 +641,11 @@ pub fn leaks(conn: &Connection, since: i64) -> Result<Vec<Leak>> {
             freed_at: r.get(11)?,
             freed: r.get(12)?,
         })
-    })?;
-    rows.collect()
+    })?
+    .collect::<Result<_>>()?;
+    // Still growing first, then the fastest: the same numbers the page shows.
+    out.sort_by(|a, b| a.resolved.cmp(&b.resolved).then(b.rate.total_cmp(&a.rate)));
+    Ok(out)
 }
 
 /// Number of leaks still growing, for the sidebar.

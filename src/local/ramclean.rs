@@ -66,7 +66,11 @@ pub fn activity_for_pass(
     ts: i64,
 ) -> rusqlite::Result<(HashMap<(u32, i64), (u64, i64)>, bool)> {
     let known = super::db::activity(conn)?;
-    let recorded = !known.is_empty();
+    // The table is only worth trusting while the recorder is still writing to it.
+    let fresh = conn
+        .query_row("SELECT COALESCE(MAX(ts), 0) FROM system_samples", [], |r| r.get::<_, i64>(0))
+        .map_or(false, |last| last > ts - 300);
+    let recorded = !known.is_empty() && fresh;
     let mut out: HashMap<(u32, i64), (u64, i64)> = known.into_iter().map(|(k, at)| (k, (0, at))).collect();
     let before: HashMap<(u32, i64), u64> = sys
         .processes()

@@ -150,7 +150,7 @@ fn worst_climb(points: &[Point], now: i64) -> Option<&[Point]> {
                 continue;
             }
             let hour_ago = climb.iter().rev().find(|p| p.ts <= last.ts - RECENT).map_or(first.mem, |p| p.mem);
-            if last.mem - hour_ago < RECENT_GROWTH {
+            if last.mem.saturating_sub(hour_ago) < RECENT_GROWTH {
                 continue;
             }
             let hours = (last.ts - first.ts) as f64 / 3600.0;
@@ -176,7 +176,6 @@ fn worst_climb(points: &[Point], now: i64) -> Option<&[Point]> {
 /// as such, so the page can tell a leak that is still there from one that went away.
 pub fn detect(conn: &Connection, now: i64) -> db::Result<Vec<String>> {
     let from = now - WINDOW;
-    db::set_setting(conn, db::KEY_LEAKS_CHECKED, &now.to_string())?;
     let hist = history(conn, from, now)?;
     let trims = trimmed(conn, from)?;
     let me = std::env::current_exe()
@@ -237,7 +236,7 @@ pub fn detect(conn: &Connection, now: i64) -> db::Result<Vec<String>> {
             .as_ref()
             .and_then(|p| p.iter().rev().find(|x| x.ts <= latest_ts - RECENT).map(|x| x.mem))
             .unwrap_or(latest);
-        let stalled = latest_ts >= now - LIVE && latest - hour_ago < RECENT_GROWTH;
+        let stalled = latest_ts >= now - LIVE && latest.saturating_sub(hour_ago) < RECENT_GROWTH;
         let (peak, from_mem) = conn
             .query_row("SELECT peak_mem, from_mem FROM leak_finds WHERE app = ?1", [&app], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
             .unwrap_or((0, 0));
@@ -246,6 +245,8 @@ pub fn detect(conn: &Connection, now: i64) -> db::Result<Vec<String>> {
             db::resolve_leak(conn, &app, now)?;
         }
     }
+    // Only now is it true that the whole day has been looked at.
+    db::set_setting(conn, db::KEY_LEAKS_CHECKED, &now.to_string())?;
     Ok(found)
 }
 

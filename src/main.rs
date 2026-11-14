@@ -188,7 +188,7 @@ fn free_ram_cli(args: &[String]) -> Result<(), String> {
     let ts = chrono::Utc::now().timestamp();
     // The recorder's own table can be empty or stale, so idleness is measured here as well.
     let (activity, recorded) = local::ramclean::activity_for_pass(&conn, &mut sys, ts).map_err(|e| e.to_string())?;
-    let freed = local::ramclean::run(&sys, &activity, &mut Default::default(), ts, minutes.max(0) * 60, local::tree::my_session());
+    let freed = local::ramclean::run(&sys, &activity, &mut Default::default(), ts, minutes * 60, local::tree::my_session());
     let mb = |b: u64| b as f64 / 1_048_576.0;
     for f in &freed {
         println!("{:<40} {:>3} process{}  freed {:>8.1} MB", f.app, f.procs, if f.procs == 1 { " " } else { "es" }, mb(f.bytes));
