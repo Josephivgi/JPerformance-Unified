@@ -158,7 +158,7 @@ fn leaks_cli() -> Result<(), String> {
     let (freed, passes, last) = local::db::ram_run_totals(&conn, since).map_err(|e| e.to_string())?;
     println!("\nRAM cleaner: {passes} passes, {} MB freed in total, last {}", freed / 1_048_576,
         last.map(stamp("%Y-%m-%d %H:%M")).unwrap_or_else(|| "never".into()));
-    for r in local::db::ram_runs(&conn, 10).map_err(|e| e.to_string())? {
+    for r in local::db::ram_runs(&conn, 10, 0).map_err(|e| e.to_string())? {
         // Passes recorded before 1.2.0 have no memory reading of their own.
         let mem = if r.mem_total > 0 {
             format!("{:>7.0} -> {:>7.0} MB", mb(r.mem_used), mb(r.mem_after))
@@ -181,7 +181,7 @@ fn free_ram_cli(args: &[String]) -> Result<(), String> {
         None => local::db::setting_i64(&conn, local::db::KEY_AUTO_CLEANUP_MIN, local::db::DEFAULT_AUTO_CLEANUP_MIN),
     };
     // A pass that frees everything not busy this second is not what "idle minutes" means.
-    let minutes = minutes.max(1);
+    let minutes = minutes.clamp(1, 24 * 60);
     let mut sys = local::tree::snapshot();
     sys.refresh_memory();
     let before = sys.used_memory();

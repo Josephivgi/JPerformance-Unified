@@ -434,7 +434,7 @@ async function pageRamCleanup() {
   const byApp = d.by_app || [];
   const appN = new Set(byApp.map(a => a.app)).size;
   const reach = d.mem_pct >= d.level;
-  const worst = [...open].sort((a, b) => b.rate - a.rate)[0];
+  const worst = open[0];
   // When the detector last ran, not when a leak last grew: the list can be minutes old or hours.
   const looked = d.checked || Math.max(0, ...leaks.map(l => l.last_ts || 0)) || null;
   const before = r => r.mem_total ? pct(100 * r.mem_used / r.mem_total) : '–';
@@ -469,16 +469,16 @@ async function pageRamCleanup() {
     ${gap}
     <div class="summary">
       <div><div class="k">Memory in use</div><div class="v ${d.mem_pct >= 90 ? 'crit' : ''}">${d.mem_total ? pct(d.mem_pct) : '–'}</div><div class="d">${d.mem_total ? ofBytes(d.mem_used, d.mem_total) : 'No reading yet'}${!d.mem_total ? '' : !d.on ? ', cleaner off' : reach ? ', so idle apps are freed' : `, under the ${d.level}% level`}</div></div>
-      <div><div class="k">Freed, last 30 days</div><div class="v">${bytes(total.freed)}</div><div class="d">${total.passes ? `in ${total.passes} pass${total.passes === 1 ? '' : 'es'}, from ${appN} app${appN === 1 ? '' : 's'}` : 'Nothing freed yet'}</div></div>
-      <div><div class="k">Last pass</div><div class="v one">${total.last ? ago(total.last) : 'None yet'}</div><div class="d">${runs[0] ? `${bytes(runs[0].freed)} from ${runs[0].procs} process${runs[0].procs === 1 ? '' : 'es'}` : `No pass yet. Apps idle for ${d.idle_min} min or more are freed when memory reaches ${d.level}%`}</div></div>
-      <div><div class="k">Memory leaks found</div><div class="v ${open.length ? 'crit' : ''}">${open.length}</div><div class="d one">${open.length ? `${esc(worst.name)}, +${bytes(worst.rate)} an hour${open.length > 1 ? ` and ${open.length - 1} more` : ''}` : 'None still growing'}</div></div>
+      <div><div class="k">Freed, last ${Math.min(30, S.side?.retention || 30)} days</div><div class="v">${bytes(total.freed)}</div><div class="d">${total.passes ? `in ${total.passes} pass${total.passes === 1 ? '' : 'es'}, from ${appN} app${appN === 1 ? '' : 's'}` : 'Nothing freed yet'}</div></div>
+      <div><div class="k">Last pass</div><div class="v one">${total.last ? ago(total.last) : 'None yet'}</div><div class="d">${runs[0] ? `${bytes(runs[0].freed)} from ${runs[0].procs} process${runs[0].procs === 1 ? '' : 'es'}` : 'No pass yet'}</div></div>
+      <div><div class="k">Memory leaks found</div><div class="v ${open.length ? 'crit' : ''}">${open.length}</div><div class="d one">${open.length ? `${esc(worst.name)}, +${bytes(worst.rate)}/h` : 'None still growing'}</div></div>
     </div>
     <section class="panel"><div class="panel-head"><h2>What it did</h2><span class="hint">Each pass moves the memory of apps that have been idle out of RAM and onto disk. Nothing is closed: an app reads back what it needs when you use it again, so it may pause for a moment then. It never touches the app in front, this app, Windows' own programs, or other users' processes.</span></div>
       ${runs.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th>When</th><th>What was trimmed</th><th class="r">Memory in use</th><th class="r opt">Processes</th><th style="width:170px">Moved out of RAM</th></tr></thead><tbody>${runs.slice(0, S.showAll.has('ramruns') ? runs.length : 20).map(runRow).join('')}</tbody></table></div>
         ${runs.length > 20 && !S.showAll.has('ramruns') ? `<div class="panel-body toolbar"><span class="muted grow">Showing the newest 20 of the last ${runs.length}${total.passes > runs.length ? `, ${total.passes} in all` : ''}.</span><button class="btn small ghost" data-showall="ramruns">Show all</button></div>` : ''}`
         : `<div class="empty">Nothing yet. When memory in use reaches ${d.level}%, the recorder frees the memory of apps idle for ${d.idle_min} minutes or more, and the pass is listed here.</div>`}</section>
     <section class="panel"><div class="panel-head"><h2>Memory leaks it found</h2><span class="hint">An app that kept taking memory and never gave it back: it climbed for at least 2 hours, still holds 200 MB more than it started with, gained at least 30 MB an hour, used little of the processor while it grew, and is still climbing. Closing and reopening the app gives it a fresh start. Memory the cleaner empties from a leak comes back as the app fills up again, which is how it shows.</span><span class="grow"></span>${looked ? `<span class="lbl muted">Checked ${ago(looked)}</span>` : ''}</div>
-      ${open.length || gone.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th>App</th><th class="sparkcell">Last day</th><th class="r">Grew</th><th class="r">Speed</th><th class="r opt">While it grew</th><th class="r opt2">Freed by the cleaner</th></tr></thead><tbody>
+      ${open.length || gone.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th>App</th><th class="sparkcell">Last day</th><th class="r" title="How much more memory it holds than when it started climbing">Grew</th><th class="r" title="Fastest first">Speed</th><th class="r opt">While it grew</th><th class="r opt2" title="Memory the cleaner has freed from it during this climb">Freed by the cleaner</th></tr></thead><tbody>
         ${open.map(leakRow).join('')}
         ${gone.length ? `<tr class="dup-h"><td colspan="6"><b style="font-weight:600">No longer growing</b> <span class="muted">· it was closed, or it let the memory go</span></td></tr>${gone.slice(0, 10).map(leakRow).join('')}` : ''}
         </tbody></table></div>`

@@ -477,12 +477,13 @@ pub fn log_ram_run(conn: &Connection, ts: i64, mem_used: u64, mem_total: u64, me
 }
 
 /// The last `limit` RAM cleaner passes, newest first, with the apps each one trimmed.
-pub fn ram_runs(conn: &Connection, limit: usize) -> Result<Vec<RamRun>> {
+pub fn ram_runs(conn: &Connection, limit: usize, since: i64) -> Result<Vec<RamRun>> {
     let mut stmt = conn.prepare(
-        "SELECT id, ts, mem_used, mem_total, mem_after, apps, procs, freed, auto FROM ram_runs ORDER BY ts DESC LIMIT ?1",
+        "SELECT id, ts, mem_used, mem_total, mem_after, apps, procs, freed, auto FROM ram_runs
+         WHERE ts >= ?2 ORDER BY ts DESC LIMIT ?1",
     )?;
     let mut runs: Vec<(i64, RamRun)> = stmt
-        .query_map([limit as i64], |r| {
+        .query_map(params![limit as i64, since], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 RamRun {
@@ -503,10 +504,10 @@ pub fn ram_runs(conn: &Connection, limit: usize) -> Result<Vec<RamRun>> {
     let mut items: std::collections::HashMap<i64, Vec<RamRunItem>> = std::collections::HashMap::new();
     let mut stmt = conn.prepare(
         "SELECT l.run_id, l.name, l.procs, l.mem FROM cleanup_log l JOIN ram_runs r ON r.id = l.run_id
-         WHERE l.reason = ?1 AND r.ts >= (SELECT COALESCE(MIN(ts), 0) FROM (SELECT ts FROM ram_runs ORDER BY ts DESC LIMIT ?2))
+         WHERE l.reason = ?1 AND r.ts >= (SELECT COALESCE(MIN(ts), 0) FROM (SELECT ts FROM ram_runs WHERE ts >= ?3 ORDER BY ts DESC LIMIT ?2))
          ORDER BY l.mem DESC",
     )?;
-    let rows = stmt.query_map(params![RAM_CLEAN_REASON, limit as i64], |r| {
+    let rows = stmt.query_map(params![RAM_CLEAN_REASON, limit as i64, since], |r| {
         Ok((r.get::<_, i64>(0)?, RamRunItem { app: r.get(1)?, procs: r.get(2)?, mem: r.get(3)? }))
     })?;
     for row in rows {
@@ -1154,7 +1155,7 @@ mod tests {
     fn a_pass_keeps_the_apps_it_trimmed() {
         let db = Temp::new("pass-items");
         pass(&db, 1_000, &[("chrome.exe", 8, 280 * MB), ("slack.exe", 3, 110 * MB)]);
-        let runs = ram_runs(&db.1, 10).unwrap();
+        let runs = ram_runs(&db.1, 10, 0).unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].items.len(), 2);
         assert_eq!(runs[0].items[0].app, "chrome.exe", "biggest first");
@@ -1169,7 +1170,7 @@ mod tests {
         let db = Temp::new("same-second");
         pass(&db, 2_000, &[("chrome.exe", 2, 100 * MB)]);
         pass(&db, 2_000, &[("node.exe", 1, 50 * MB)]);
-        let runs = ram_runs(&db.1, 10).unwrap();
+        let runs = ram_runs(&db.1, 10, 0).unwrap();
         assert_eq!(runs.len(), 2);
         for run in &runs {
             assert_eq!(run.items.len(), 1, "each pass keeps its own app");
@@ -1194,7 +1195,7 @@ mod tests {
             log_cleanup(&db.1, ts, name, procs, mem as u64, RAM_CLEAN_REASON, true).unwrap();
         }
         db.reopen();
-        let runs = ram_runs(&db.1, 10).unwrap();
+        let runs = ram_runs(&db.1, 10, 0).unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].apps, 3);
         assert_eq!(runs[0].freed, 2_600 * MB);
@@ -1207,7 +1208,7 @@ mod tests {
         assert_eq!(passes, 1);
         // Opening again must not add it twice.
         db.reopen();
-        assert_eq!(ram_runs(&db.1, 10).unwrap().len(), 1);
+        assert_eq!(ram_runs(&db.1, 10, 0).unwrap().len(), 1);
     }
 
     #[test]

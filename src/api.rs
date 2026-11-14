@@ -624,10 +624,10 @@ async fn ram_cleanup(app: tauri::State<'_, App>) -> Res {
     let level = ldb::setting_i64(&l, ldb::KEY_RAM_CLEAN_PCT, ldb::DEFAULT_RAM_CLEAN_PCT);
     let idle_min = ldb::setting_i64(&l, ldb::KEY_AUTO_CLEANUP_MIN, ldb::DEFAULT_AUTO_CLEANUP_MIN);
     let latest = ldb::latest_sample(&l).map_err(e)?;
-    // A pass can happen every minute while memory is high, so this is a page, not everything: the page
-    // says how many of the total it is showing.
-    let runs = ldb::ram_runs(&l, 500).map_err(e)?;
     let since = now() - ldb::RAM_RUN_HISTORY_DAYS * 86_400;
+    // A pass can happen every minute while memory is high, so this is a page, not everything: the page
+    // says how many of the total it is showing. The table and the total above it cover the same window.
+    let runs = ldb::ram_runs(&l, 500, since).map_err(e)?;
     let (freed, passes, last) = ldb::ram_run_totals(&l, since).map_err(e)?;
     let by_app: Vec<Value> = ldb::ram_freed_by_app(&l, since)
         .map_err(e)?
