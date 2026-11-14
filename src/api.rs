@@ -624,7 +624,8 @@ async fn ram_cleanup(app: tauri::State<'_, App>) -> Res {
     let level = ldb::setting_i64(&l, ldb::KEY_RAM_CLEAN_PCT, ldb::DEFAULT_RAM_CLEAN_PCT);
     let idle_min = ldb::setting_i64(&l, ldb::KEY_AUTO_CLEANUP_MIN, ldb::DEFAULT_AUTO_CLEANUP_MIN);
     let latest = ldb::latest_sample(&l).map_err(e)?;
-    let runs = ldb::ram_runs(&l, 40).map_err(e)?;
+    // Enough that "Show all" really shows them all; the page lists the newest 20 first.
+    let runs = ldb::ram_runs(&l, 100).map_err(e)?;
     let since = now() - ldb::RAM_RUN_HISTORY_DAYS * 86_400;
     let (freed, passes, last) = ldb::ram_run_totals(&l, since).map_err(e)?;
     let by_app: Vec<Value> = ldb::ram_freed_by_app(&l, since)
@@ -655,6 +656,7 @@ async fn ram_cleanup(app: tauri::State<'_, App>) -> Res {
         "total": { "freed": freed, "passes": passes, "last": last },
         "by_app": by_app,
         "leaks": leaks,
+        "checked": ldb::get_setting(&l, ldb::KEY_LEAKS_CHECKED).ok().flatten().and_then(|v| v.parse::<i64>().ok()),
     }))
 }
 
@@ -674,7 +676,7 @@ async fn ram_free_now(app: tauri::State<'_, App>) -> Res {
         let mut conn = ldb::open(&paths::local_db()).map_err(e)?;
         let level = ldb::setting_i64(&conn, ldb::KEY_RAM_CLEAN_PCT, ldb::DEFAULT_RAM_CLEAN_PCT);
         // The recorder's own table can be empty or stale, so idleness is measured here as well.
-        let activity = crate::local::ramclean::activity_for_pass(&conn, &mut sys, ts, idle_min * 60).map_err(e)?;
+        let (activity, recorded) = crate::local::ramclean::activity_for_pass(&conn, &mut sys, ts).map_err(e)?;
         let freed = crate::local::ramclean::run(&sys, &activity, &mut HashMap::new(), ts, idle_min * 60, tree::my_session());
         let mut after_sys = sysinfo::System::new();
         after_sys.refresh_memory();
@@ -691,6 +693,7 @@ async fn ram_free_now(app: tauri::State<'_, App>) -> Res {
         }
         Ok::<Value, String>(json!({
             "freed": bytes,
+            "recorded": recorded,
             "procs": procs,
             "mem_before": before,
             "mem_after": after,

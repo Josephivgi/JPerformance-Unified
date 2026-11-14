@@ -57,16 +57,17 @@ fn trim(pid: u32) -> Option<u64> {
 }
 
 /// When each process last used the CPU, for a pass asked for outside the recorder (the page's button, the
-/// command line). The recorder's table can be empty or stale, so anything busy during a short sample here
-/// counts as active now, and a process the recorder has never seen counts as idle: it is doing nothing.
+/// command line). Anything busy during a short sample here counts as active now, and so does a process the
+/// recorder has never seen: without its history there is no telling how long it has been idle, so it is
+/// left alone. Returns that map, and whether the recorder had any history at all.
 pub fn activity_for_pass(
     conn: &rusqlite::Connection,
     sys: &mut System,
     ts: i64,
-    idle_for: i64,
-) -> rusqlite::Result<HashMap<(u32, i64), (u64, i64)>> {
-    let mut out: HashMap<(u32, i64), (u64, i64)> =
-        super::db::activity(conn)?.into_iter().map(|(k, at)| (k, (0, at))).collect();
+) -> rusqlite::Result<(HashMap<(u32, i64), (u64, i64)>, bool)> {
+    let known = super::db::activity(conn)?;
+    let recorded = !known.is_empty();
+    let mut out: HashMap<(u32, i64), (u64, i64)> = known.into_iter().map(|(k, at)| (k, (0, at))).collect();
     let before: HashMap<(u32, i64), u64> = sys
         .processes()
         .iter()
@@ -78,13 +79,11 @@ pub fn activity_for_pass(
         let key = (pid.as_u32(), p.start_time() as i64);
         let cpu = p.accumulated_cpu_time();
         let busy = cpu.saturating_sub(before.get(&key).copied().unwrap_or(cpu)) >= 60;
-        if busy {
+        if busy || !out.contains_key(&key) {
             out.insert(key, (cpu, ts));
-        } else if !out.contains_key(&key) {
-            out.insert(key, (cpu, ts - idle_for - 1));
         }
     }
-    Ok(out)
+    Ok((out, recorded))
 }
 
 /// One pass. `activity` maps (pid, start time) to (cpu ms, last active ts); `trimmed` remembers when each

@@ -75,12 +75,22 @@ fn trimmed(conn: &Connection, from: i64) -> db::Result<HashMap<String, Vec<(i64,
 /// Puts back what the cleaner took. Emptying an app's working set drops the figure the recorder reads,
 /// and the app then reads that memory back in — which is the leak. Without this, every pass would look
 /// like the app letting go of its memory, and a leak the cleaner keeps emptying would never be found.
+///
+/// What is added back is what the app had before the pass, never more: an app that fills straight back up
+/// to where it was shows no growth at all, and only an app that keeps going past its old level climbs.
+/// The floor is taken from the series as it has been corrected so far, so several passes in a row build
+/// on each other instead of piling up.
 fn with_trims(points: &[Point], trims: &[(i64, i64)]) -> Vec<Point> {
     let mut out = points.to_vec();
-    for &(ts, bytes) in trims {
-        // Only the readings after the pass: the bucket the pass fell in still holds what was there before it.
-        for p in out.iter_mut().filter(|p| p.ts > ts) {
-            p.mem += bytes;
+    for &(ts, _bytes) in trims {
+        // The last reading before the pass: what the app had before its memory was moved out of RAM.
+        let Some(pre) = points.iter().zip(out.iter()).filter(|(p, _)| p.ts <= ts).next_back().map(|(_, o)| o.mem) else {
+            continue;
+        };
+        for (p, raw) in out.iter_mut().zip(points.iter()) {
+            if raw.ts > ts && p.mem < pre {
+                p.mem = pre;
+            }
         }
     }
     out
@@ -166,6 +176,7 @@ fn worst_climb(points: &[Point], now: i64) -> Option<&[Point]> {
 /// as such, so the page can tell a leak that is still there from one that went away.
 pub fn detect(conn: &Connection, now: i64) -> db::Result<Vec<String>> {
     let from = now - WINDOW;
+    db::set_setting(conn, db::KEY_LEAKS_CHECKED, &now.to_string())?;
     let hist = history(conn, from, now)?;
     let trims = trimmed(conn, from)?;
     let me = std::env::current_exe()
@@ -175,7 +186,8 @@ pub fn detect(conn: &Connection, now: i64) -> db::Result<Vec<String>> {
     let mut found: Vec<String> = Vec::new();
 
     for (app, points) in &hist {
-        if app.eq_ignore_ascii_case(&me) || procs::is_protected(app, None) {
+        let exe = db::app_exe(conn, app).ok().flatten();
+        if app.eq_ignore_ascii_case(&me) || procs::is_protected(app, exe.as_deref()) {
             continue;
         }
         let points = match trims.get(app) {
@@ -209,13 +221,28 @@ pub fn detect(conn: &Connection, now: i64) -> db::Result<Vec<String>> {
         if found.iter().any(|a| a.eq_ignore_ascii_case(&app)) {
             continue;
         }
-        let latest = hist.get(&app).and_then(|p| p.last().map(|x| x.mem)).unwrap_or(0);
-        let quiet = hist.get(&app).and_then(|p| p.last().map(|x| x.ts)).unwrap_or(0) < now - 30 * 60;
+        // The same corrected series the detector looks at, so a pass that emptied the app is not
+        // mistaken for the app letting its memory go.
+        let corrected = hist.get(&app).map(|points| match trims.get(&app) {
+            Some(list) => with_trims(points, list),
+            None => points.clone(),
+        });
+        let last = corrected.as_ref().and_then(|p| p.last().copied());
+        let latest = last.map_or(0, |x| x.mem);
+        let latest_ts = last.map_or(0, |x| x.ts);
+        let quiet = latest_ts < now - 30 * 60;
+        // Still being sampled, but nothing went in over the last hour: the climb has stopped. A leak that
+        // keeps growing gains at least MIN_RATE an hour, so this cannot catch a live one.
+        let hour_ago = corrected
+            .as_ref()
+            .and_then(|p| p.iter().rev().find(|x| x.ts <= latest_ts - RECENT).map(|x| x.mem))
+            .unwrap_or(latest);
+        let stalled = latest_ts >= now - LIVE && latest - hour_ago < RECENT_GROWTH;
         let (peak, from_mem) = conn
             .query_row("SELECT peak_mem, from_mem FROM leak_finds WHERE app = ?1", [&app], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
             .unwrap_or((0, 0));
         let fell = latest <= from_mem + (peak - from_mem) / 2;
-        if fell || (quiet && !recorder_quiet) {
+        if fell || stalled || (quiet && !recorder_quiet) {
             db::resolve_leak(conn, &app, now)?;
         }
     }
@@ -283,9 +310,12 @@ mod tests {
 
     #[test]
     fn a_closed_app_is_not_followed_across_the_gap() {
-        // Two short climbs either side of a long gap, neither long enough on its own.
-        let mut points = series(2, 1.0, |i| 100 + i * 60 / 6);
-        points.extend((0..12).map(|i| Point { ts: NOW - 8 * 3600 + i * BUCKET, mem: (100 + i * 60 / 6) * MB, cpu: 1.0 }));
+        // Two short climbs either side of a long gap, neither long enough on its own. Readings always
+        // arrive in time order, so the older stretch comes first.
+        let mut points: Vec<Point> =
+            (0..12).map(|i| Point { ts: NOW - 8 * 3600 + i * BUCKET, mem: (100 + i * 60 / 6) * MB, cpu: 1.0 }).collect();
+        points.extend(series(2, 1.0, |i| 100 + i * 60 / 6));
+        assert_eq!(stretches(&points).len(), 2, "the gap splits the history");
         assert!(worst_climb(&points, NOW).is_none());
     }
 
@@ -317,22 +347,119 @@ mod tests {
         assert!(climb.last().unwrap().mem >= 500 * MB);
     }
 
+    /// What the recorder sees when the cleaner empties an app that reads the memory straight back:
+    /// the working set drops by what was trimmed, then climbs at `back` a reading (in bytes).
+    fn trimmed(points: &[Point], trims: &[(i64, i64)], back: i64) -> Vec<Point> {
+        let mut out = points.to_vec();
+        for &(ts, bytes) in trims {
+            // Everything after the pass loses the memory at once.
+            for p in out.iter_mut().filter(|p| p.ts > ts) {
+                p.mem -= bytes;
+            }
+            // Then it comes back, a little each reading, and stays back.
+            let mut owed = bytes;
+            let mut read = 0;
+            for p in out.iter_mut().filter(|p| p.ts > ts) {
+                if owed > 0 {
+                    let give = back.min(owed);
+                    read += give;
+                    owed -= give;
+                }
+                p.mem += read;
+            }
+        }
+        out
+    }
+
     #[test]
-    fn memory_the_cleaner_freed_is_added_back() {
-        // The cleaner empties the app's working set twice; the app reads it all back. Without the
-        // add-back this looks like the app letting go of its memory and no leak is found.
-        let mut points = series(6, 1.0, |i| 200 + i * 40 / 6);
+    fn a_leak_the_cleaner_keeps_emptying_is_still_a_leak() {
+        // 40 MB an hour, trimmed by 90 MB every two hours, read back at 45 MB a reading: the working set
+        // sawtooths, but the memory the app wants keeps climbing. That is the leak.
+        let demand = series(6, 1.0, |i| 200 + i * 40 / 6);
+        let trims = vec![(demand[12].ts, 90 * MB), (demand[24].ts, 90 * MB)];
+        let seen = trimmed(&demand, &trims, 45 * MB);
+        assert!(worst_climb(&seen, NOW).is_none(), "on its own the sawtooth hides the climb");
+        let fixed = with_trims(&seen, &trims);
+        let climb = worst_climb(&fixed, NOW).expect("a leak");
+        assert!(climb.last().unwrap().mem >= 400 * MB, "what the app wanted, not what it had");
+    }
+
+    #[test]
+    fn an_app_that_reads_back_what_was_freed_is_not_a_leak() {
+        // A flat 300 MB app, emptied four times and filling straight back up: nothing is accumulating,
+        // so nothing may be added back on top of it either.
+        let flat = series(6, 1.0, |_| 300);
+        let trims = vec![(flat[6].ts, 90 * MB), (flat[12].ts, 90 * MB), (flat[18].ts, 90 * MB), (flat[24].ts, 90 * MB)];
+        let seen = trimmed(&flat, &trims, 90 * MB);
+        let fixed = with_trims(&seen, &trims);
+        assert!(fixed.iter().all(|p| p.mem == 300 * MB), "the app never had more than 300 MB");
+        assert!(worst_climb(&fixed, NOW).is_none());
+    }
+
+    #[test]
+    fn memory_the_cleaner_took_that_never_came_back_is_not_a_climb() {
+        // The cleaner empties 90 MB twice and the app never reads it back: its working set ends lower
+        // than it started, so this is not the app taking more memory.
+        let points = series(6, 1.0, |i| 200 + i * 40 / 6);
         let trims = vec![(points[12].ts, 90 * MB), (points[24].ts, 90 * MB)];
+        let mut seen = points.clone();
         for &(ts, bytes) in &trims {
-            for p in points.iter_mut().filter(|p| p.ts > ts) {
+            for p in seen.iter_mut().filter(|p| p.ts > ts) {
                 p.mem -= bytes;
             }
         }
-        // What the cleaner left behind: a sawtooth that never recovers on its own.
-        assert!(worst_climb(&points, NOW).is_none());
-        let fixed = with_trims(&points, &trims);
-        let climb = worst_climb(&fixed, NOW).expect("a leak");
-        assert!(climb.last().unwrap().mem >= 400 * MB);
+        let fixed = with_trims(&seen, &trims);
+        assert!(worst_climb(&fixed, NOW).is_none());
+    }
+
+    #[test]
+    fn a_leak_that_stops_climbing_is_marked_as_stopped() {
+        // A climb that has flattened is no longer a leak, and the stored row has to say so: the badge,
+        // the tile and the command line all read that row.
+        let path = std::env::temp_dir().join(format!("jpu-leaks-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let conn = db::open(&path).expect("open");
+        let mut rows = Vec::new();
+        for (app, flat_from) in [("growing.exe", None), ("flat.exe", Some(12))] {
+            for i in 0..36 {
+                let mem = match flat_from {
+                    // Climbs for two hours, then holds: 200 MB, then flat at 440.
+                    Some(n) if i >= n => 440,
+                    Some(_) => 200 + i * 20,
+                    None => 200 + i * 40 / 6,
+                };
+                rows.push((NOW - 6 * 3600 + i * BUCKET, app.to_string(), 1.0f64, mem as i64 * MB));
+            }
+        }
+        for (minute, app, cpu, mem) in rows {
+            conn.execute(
+                "insert or replace into app_minutes(minute, app, cpu_avg, cpu_max, mem_avg, mem_max, io_bytes, procs)
+                 values (?1, ?2, ?3, ?3, ?4, ?4, 0, 2)",
+                rusqlite::params![minute, app, cpu, mem],
+            )
+            .unwrap();
+        }
+        // Both are found first: the flat one is still climbing at that point.
+        db::upsert_leak(
+            &conn,
+            &db::LeakRow {
+                app: "flat.exe".into(),
+                first_ts: NOW - 4 * 3600,
+                last_ts: NOW - 3 * 3600,
+                from_mem: 200 * MB,
+                peak_mem: 440 * MB,
+                rate: 60.0,
+                hours: 4.0,
+                cpu: 1.0,
+                series: "[]".into(),
+            },
+        )
+        .unwrap();
+        let found = detect(&conn, NOW).unwrap();
+        assert!(found.iter().any(|a| a == "growing.exe"), "a climb that is still going is a leak");
+        assert!(!found.iter().any(|a| a == "flat.exe"), "a plateau is not");
+        assert_eq!(db::leak_count(&conn).unwrap(), 1, "the plateau is no longer counted as growing");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

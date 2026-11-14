@@ -180,12 +180,14 @@ fn free_ram_cli(args: &[String]) -> Result<(), String> {
         Some(m) => m.parse::<i64>().map_err(|_| "usage: --free-ram [idle minutes]".to_string())?,
         None => local::db::setting_i64(&conn, local::db::KEY_AUTO_CLEANUP_MIN, local::db::DEFAULT_AUTO_CLEANUP_MIN),
     };
+    // A pass that frees everything not busy this second is not what "idle minutes" means.
+    let minutes = minutes.max(1);
     let mut sys = local::tree::snapshot();
     sys.refresh_memory();
     let before = sys.used_memory();
     let ts = chrono::Utc::now().timestamp();
     // The recorder's own table can be empty or stale, so idleness is measured here as well.
-    let activity = local::ramclean::activity_for_pass(&conn, &mut sys, ts, minutes.max(0) * 60).map_err(|e| e.to_string())?;
+    let (activity, recorded) = local::ramclean::activity_for_pass(&conn, &mut sys, ts).map_err(|e| e.to_string())?;
     let freed = local::ramclean::run(&sys, &activity, &mut Default::default(), ts, minutes.max(0) * 60, local::tree::my_session());
     let mb = |b: u64| b as f64 / 1_048_576.0;
     for f in &freed {
@@ -199,18 +201,24 @@ fn free_ram_cli(args: &[String]) -> Result<(), String> {
         let procs: usize = freed.iter().map(|f| f.procs).sum();
         let level = local::db::setting_i64(&conn, local::db::KEY_RAM_CLEAN_PCT, local::db::DEFAULT_RAM_CLEAN_PCT);
         // The pass and the apps it emptied go in together, so the page never shows half a pass.
-        if let Ok(tx) = conn.transaction() {
-            let saved = local::db::log_ram_run(&tx, ts, before, sys.total_memory(), after.used_memory(), level, freed.len(), procs, bytes, false)
+        match conn.transaction() {
+            Ok(tx) => {
+                let saved = local::db::log_ram_run(&tx, ts, before, sys.total_memory(), after.used_memory(), level, freed.len(), procs, bytes, false)
                 .and_then(|run| {
                     for f in &freed {
                         local::db::log_ram_item(&tx, run, ts, &f.app, f.procs, f.bytes, false)?;
                     }
                     Ok(())
                 });
-            if let Err(e) = saved.and_then(|()| tx.commit()) {
-                eprintln!("could not save the pass: {e}");
+                if let Err(e) = saved.and_then(|()| tx.commit()) {
+                    eprintln!("could not save the pass: {e}");
+                }
             }
+            Err(e) => eprintln!("could not save the pass: {e}"),
         }
+    }
+    if !recorded && freed.is_empty() {
+        println!("The recorder has no activity history yet, so nothing is known to have been idle.");
     }
     println!("idle at least {minutes} min: {} apps, {:.1} MB moved out of RAM; memory in use {:.0} MB -> {:.0} MB",
         freed.len(), mb(freed.iter().map(|f| f.bytes).sum()), mb(before), mb(after.used_memory()));

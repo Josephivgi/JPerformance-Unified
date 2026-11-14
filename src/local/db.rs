@@ -187,7 +187,10 @@ fn migrate(conn: &Connection) -> Result<()> {
         "INSERT INTO ram_runs(ts, mem_used, mem_total, mem_after, level, apps, procs, freed, auto)
          SELECT ts, 0, 0, 0, 0, COUNT(*), SUM(procs), SUM(mem), MAX(auto)
          FROM cleanup_log WHERE reason = 'Freed memory while idle'
-         GROUP BY ts HAVING ts NOT IN (SELECT ts FROM ram_runs);",
+         GROUP BY ts HAVING ts NOT IN (SELECT ts FROM ram_runs);
+         UPDATE cleanup_log SET run_id = (SELECT MIN(r.id) FROM ram_runs r WHERE r.ts = cleanup_log.ts)
+         WHERE reason = 'Freed memory while idle' AND run_id IS NULL
+           AND ts IN (SELECT ts FROM ram_runs);",
     )?;
     for col in ["proc_count", "app_count", "commit_used", "commit_total"] {
         if !cols.iter().any(|c| c == col) {
@@ -239,6 +242,8 @@ pub const DEFAULT_RAM_CLEAN_PCT: i64 = 85;
 pub const RAM_CLEAN_REASON: &str = "Freed memory while idle";
 /// How many days of RAM cleaner passes the RAM page keeps.
 pub const RAM_RUN_HISTORY_DAYS: i64 = 30;
+/// When the leak finder last looked, so the page can say that instead of the newest leak's time.
+pub const KEY_LEAKS_CHECKED: &str = "leaks_checked";
 
 /// Developer option: update checks go through the user's signed-in GitHub CLI. Off by default.
 pub const KEY_USE_GH: &str = "update_use_gh";
@@ -582,10 +587,8 @@ pub fn upsert_leak(conn: &Connection, l: &LeakRow) -> Result<()> {
     conn.execute(
         "INSERT INTO leak_finds(app, first_ts, last_ts, gone_ts, from_mem, peak_mem, rate, hours, cpu, series, resolved)
          VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7, ?8, ?9, 0)
-         ON CONFLICT(app) DO UPDATE SET last_ts = excluded.last_ts, gone_ts = 0,
-             first_ts = CASE WHEN leak_finds.resolved = 1 THEN excluded.first_ts ELSE MIN(leak_finds.first_ts, excluded.first_ts) END,
-             from_mem = CASE WHEN leak_finds.resolved = 1 THEN excluded.from_mem ELSE MIN(leak_finds.from_mem, excluded.from_mem) END,
-             peak_mem = MAX(leak_finds.peak_mem, excluded.peak_mem),
+         ON CONFLICT(app) DO UPDATE SET first_ts = excluded.first_ts, last_ts = excluded.last_ts, gone_ts = 0,
+             from_mem = excluded.from_mem, peak_mem = excluded.peak_mem,
              rate = excluded.rate, hours = excluded.hours, cpu = excluded.cpu, series = excluded.series, resolved = 0",
         params![l.app, l.first_ts, l.last_ts, l.from_mem, l.peak_mem, l.rate, l.hours, l.cpu, l.series],
     )?;
@@ -803,6 +806,13 @@ pub struct AppSummary {
     /// last taskbar window title recorded for this program, if it ever had one
     #[serde(skip_serializing)]
     pub window_title: Option<String>,
+}
+
+/// Where an app's program file lives, when it has been seen running.
+pub fn app_exe(conn: &Connection, app: &str) -> Result<Option<String>> {
+    conn.query_row("SELECT exe_path FROM apps WHERE app = ?1", [app], |r| r.get(0))
+        .optional()
+        .map(Option::flatten)
 }
 
 /// The raw file description of one app (not the view's window-title swap).
@@ -1185,6 +1195,8 @@ mod tests {
         assert_eq!(runs[0].apps, 3);
         assert_eq!(runs[0].freed, 2_600 * MB);
         assert_eq!(runs[0].mem_total, 0, "no memory reading for an old pass");
+        assert_eq!(runs[0].items.len(), 3, "an old pass still names the apps it emptied");
+        assert_eq!(runs[0].items[0].app, "chrome.exe");
         let by_app = ram_freed_by_app(&db.1, 0).unwrap();
         let (freed, passes, _) = ram_run_totals(&db.1, 0).unwrap();
         assert_eq!(freed, by_app.iter().map(|a| a.1).sum::<i64>(), "the two lists agree");
@@ -1225,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn a_leak_row_keeps_the_first_time_it_was_seen_and_the_most_it_reached() {
+    fn a_leak_row_describes_the_climb_happening_now() {
         let db = Temp::new("leak-merge");
         let first = LeakRow {
             app: "sawtooth.exe".into(),
@@ -1239,16 +1251,17 @@ mod tests {
             series: "[]".into(),
         };
         upsert_leak(&db.1, &first).unwrap();
-        // Seen again, a little further along and from a lower starting point.
-        let next = LeakRow { first_ts: 4_000, last_ts: 9_000, from_mem: 140 * MB, peak_mem: 620 * MB, ..first };
+        // Seen again after it let its memory go and started over: the row is the new climb, so the
+        // numbers on the page never mix two of them.
+        let next = LeakRow { first_ts: 8_000, last_ts: 9_000, from_mem: 140 * MB, peak_mem: 620 * MB, ..first };
         upsert_leak(&db.1, &next).unwrap();
         let leak = &super::leaks(&db.1, 0).unwrap()[0];
-        assert_eq!(leak.first_ts, 1_000, "the first time it was seen");
-        assert_eq!(leak.peak_mem, 620 * MB, "the most it reached");
-        assert_eq!(leak.from_mem, 140 * MB, "the lowest it started from");
+        assert_eq!(leak.first_ts, 8_000, "this climb started here");
+        assert_eq!(leak.peak_mem, 620 * MB);
+        assert_eq!(leak.from_mem, 140 * MB);
         assert_eq!(leak.last_ts, 9_000);
         // Rate and span always come from that stored window, never from two different climbs.
-        let hours = (9_000 - 1_000) as f64 / 3600.0;
+        let hours = (9_000 - 8_000) as f64 / 3600.0;
         assert!((leak.hours - hours).abs() < 0.001);
         assert!((leak.rate - (620 - 140) as f64 * MB as f64 / hours).abs() < 1.0);
     }
