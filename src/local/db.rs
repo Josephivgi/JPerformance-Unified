@@ -1242,6 +1242,28 @@ mod tests {
     }
 
     #[test]
+    fn leaks_come_back_fastest_first_with_the_stopped_ones_last() {
+        let db = Temp::new("leak-order");
+        let row = |app: &str, rate: f64| LeakRow {
+            app: app.into(),
+            first_ts: 1_000,
+            last_ts: 9_000,
+            from_mem: 100 * MB,
+            peak_mem: 100 * MB + (rate * 8.0) as i64 * MB,
+            rate,
+            hours: 8.0,
+            cpu: 1.0,
+            series: "[]".into(),
+        };
+        upsert_leak(&db.1, &row("slow.exe", 20.0)).unwrap();
+        upsert_leak(&db.1, &row("stopped.exe", 500.0)).unwrap();
+        upsert_leak(&db.1, &row("fast.exe", 300.0)).unwrap();
+        resolve_leak(&db.1, "stopped.exe", 9_500).unwrap();
+        let order: Vec<String> = super::leaks(&db.1, 0).unwrap().into_iter().map(|l| l.app).collect();
+        assert_eq!(order, ["fast.exe", "slow.exe", "stopped.exe"], "fastest first, stopped last");
+    }
+
+    #[test]
     fn a_leak_row_describes_the_climb_happening_now() {
         let db = Temp::new("leak-merge");
         let first = LeakRow {

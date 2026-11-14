@@ -429,7 +429,8 @@ async function pageFindings() {
 async function pageRamCleanup() {
   const d = await invoke('ram_cleanup');
   const runs = d.runs || [], leaks = d.leaks || [];
-  const open = leaks.filter(l => !l.resolved), gone = leaks.filter(l => l.resolved);
+  const open = leaks.filter(l => !l.resolved).sort((a, b) => b.rate - a.rate);
+  const gone = leaks.filter(l => l.resolved).sort((a, b) => b.rate - a.rate);
   const total = d.total || { freed: 0, passes: 0, last: null };
   const byApp = d.by_app || [];
   const appN = new Set(byApp.map(a => a.app)).size;
@@ -471,7 +472,7 @@ async function pageRamCleanup() {
       <div><div class="k">Memory in use</div><div class="v ${d.mem_pct >= 90 ? 'crit' : ''}">${d.mem_total ? pct(d.mem_pct) : '–'}</div><div class="d">${d.mem_total ? ofBytes(d.mem_used, d.mem_total) : 'No reading yet'}${!d.mem_total ? '' : !d.on ? ', cleaner off' : reach ? ', so idle apps are freed' : `, under the ${d.level}% level`}</div></div>
       <div><div class="k">Freed, last ${Math.min(30, S.side?.retention || 30)} days</div><div class="v">${bytes(total.freed)}</div><div class="d">${total.passes ? `in ${total.passes} pass${total.passes === 1 ? '' : 'es'}, from ${appN} app${appN === 1 ? '' : 's'}` : 'Nothing freed yet'}</div></div>
       <div><div class="k">Last pass</div><div class="v one">${total.last ? ago(total.last) : 'None yet'}</div><div class="d">${runs[0] ? `${bytes(runs[0].freed)} from ${runs[0].procs} process${runs[0].procs === 1 ? '' : 'es'}` : 'No pass yet'}</div></div>
-      <div><div class="k">Memory leaks found</div><div class="v ${open.length ? 'crit' : ''}">${open.length}</div><div class="d one">${open.length ? `${esc(worst.name)}, +${bytes(worst.rate)}/h` : 'None still growing'}</div></div>
+      <div><div class="k">Memory leaks found</div><div class="v ${open.length ? 'crit' : ''}">${open.length}</div><div class="d wrap">${open.length ? `+${bytes(worst.rate)}/h · ${esc(worst.name)}` : 'None still growing'}</div></div>
     </div>
     <section class="panel"><div class="panel-head"><h2>What it did</h2><span class="hint">Each pass moves the memory of apps that have been idle out of RAM and onto disk. Nothing is closed: an app reads back what it needs when you use it again, so it may pause for a moment then. It never touches the app in front, this app, Windows' own programs, or other users' processes.</span></div>
       ${runs.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th>When</th><th>What was trimmed</th><th class="r">Memory in use</th><th class="r opt">Processes</th><th style="width:170px">Moved out of RAM</th></tr></thead><tbody>${runs.slice(0, S.showAll.has('ramruns') ? runs.length : 20).map(runRow).join('')}</tbody></table></div>
