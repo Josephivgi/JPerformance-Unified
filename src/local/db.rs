@@ -189,6 +189,13 @@ pub const KEY_AUTO_CLEANUP: &str = "auto_cleanup";
 pub const KEY_AUTO_CLEANUP_MIN: &str = "auto_cleanup_minutes";
 pub const DEFAULT_AUTO_CLEANUP_MIN: i64 = 15;
 
+/// Background RAM cleaner: frees the memory of idle apps when memory in use reaches a level. On by default.
+pub const KEY_RAM_CLEAN: &str = "ram_clean";
+pub const KEY_RAM_CLEAN_PCT: &str = "ram_clean_pct";
+pub const DEFAULT_RAM_CLEAN_PCT: i64 = 85;
+/// Reason written to the clean-up log for memory the RAM cleaner freed.
+pub const RAM_CLEAN_REASON: &str = "Freed memory while idle";
+
 /// Developer option: update checks go through the user's signed-in GitHub CLI. Off by default.
 pub const KEY_USE_GH: &str = "update_use_gh";
 

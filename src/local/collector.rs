@@ -1,7 +1,7 @@
 //! Background collector. Runs as `JPerformance.exe --collector`, samples the whole
 //! system every few seconds and rolls per-app usage up into one row per minute.
 
-use super::{db, describe, procs, tree};
+use super::{db, describe, procs, ramclean, tree};
 use crate::paths;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -72,6 +72,8 @@ pub fn run(stop: &AtomicBool) -> Result<(), String> {
     let mut activity: HashMap<(u32, i64), (u64, i64)> = HashMap::new();
     let mut last_activity_write = Instant::now();
     let my_session = tree::my_session();
+    // When the RAM cleaner last trimmed each process, so it is not trimmed again every minute.
+    let mut trimmed: HashMap<(u32, i64), i64> = HashMap::new();
 
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -148,6 +150,17 @@ pub fn run(stop: &AtomicBool) -> Result<(), String> {
             if db::setting_i64(&conn, db::KEY_AUTO_CLEANUP, 0) != 0 {
                 let idle_for = db::setting_i64(&conn, db::KEY_AUTO_CLEANUP_MIN, db::DEFAULT_AUTO_CLEANUP_MIN).max(1) * 60;
                 auto_cleanup(&conn, &sys, cores, &activity, ts, idle_for, my_session);
+            }
+            if db::setting_i64(&conn, db::KEY_RAM_CLEAN, 1) != 0 {
+                let level = db::setting_i64(&conn, db::KEY_RAM_CLEAN_PCT, db::DEFAULT_RAM_CLEAN_PCT).clamp(50, 99) as f64;
+                let used = sys.used_memory() as f64 * 100.0 / sys.total_memory().max(1) as f64;
+                if used >= level {
+                    let idle_for = db::setting_i64(&conn, db::KEY_AUTO_CLEANUP_MIN, db::DEFAULT_AUTO_CLEANUP_MIN).max(1) * 60;
+                    for f in ramclean::run(&sys, &activity, &mut trimmed, ts, idle_for, my_session) {
+                        log(&format!("RAM cleaner freed {} MB from {} ({} processes)", f.bytes / 1_048_576, f.app, f.procs));
+                        let _ = db::log_cleanup(&conn, ts, &f.app, f.procs, f.bytes, db::RAM_CLEAN_REASON, true);
+                    }
+                }
             }
         }
 

@@ -658,7 +658,11 @@ async function pcCleanup() {
       <td class="r"><button class="btn small" data-treestop="${key2(g.pid, g.started)}" data-label="${esc(g.title || g.label)}" data-procs="${g.sum.procs}" data-mem="${g.sum.mem}">${ic('stop')}Stop all</button></td></tr>
       ${open ? g.branches.map(branchRow).join('') : ''}`;
   }).join('');
-  const log = d.log.length ? d.log.slice(0, 10).map(l => `<div style="display:flex;gap:10px;padding:4px 0;font-size:12.5px"><span class="muted" style="width:120px;flex:none">${when(l.ts)}</span><span style="flex:1"><b style="font-weight:600">${esc(l.name)}</b> · ${l.procs} process${l.procs === 1 ? '' : 'es'}, ${bytes(l.mem)}</span><span class="muted">${l.auto ? 'Automatic' : 'By you'}</span></div>`).join('') : '<span class="muted">Nothing stopped yet.</span>';
+  // A RAM cleaner line says what moved out of RAM; nothing was closed, unlike a stop.
+  const logWhat = l => l.reason === d.ram_reason
+    ? `freed ${bytes(l.mem)} of RAM from ${l.procs} idle process${l.procs === 1 ? '' : 'es'}, still running`
+    : `stopped ${l.procs} process${l.procs === 1 ? '' : 'es'}, ${bytes(l.mem)}`;
+  const log = d.log.length ? d.log.slice(0, 10).map(l => `<div style="display:flex;gap:10px;padding:4px 0;font-size:12.5px"><span class="muted" style="width:120px;flex:none">${when(l.ts)}</span><span style="flex:1"><b style="font-weight:600">${esc(stem(l.name))}</b> · ${logWhat(l)}</span><span class="muted">${l.auto ? 'Automatic' : 'By you'}</span></div>`).join('') : '<span class="muted">Nothing cleaned up yet.</span>';
   const big = d.groups[0];
   return `
   <div class="summary">
@@ -673,8 +677,10 @@ async function pcCleanup() {
     <div><table class="tbl freeze stick-head"><thead><tr><th>App</th><th class="r">Processes</th><th class="r">CPU</th><th class="r">Memory</th><th class="r">Last active</th><th></th></tr></thead><tbody>${groups}${moreRow(30, d.groups.length, 'groups', 6)}</tbody></table></div></section>
   <section class="panel"><div class="panel-head"><h2>Automatic clean-up</h2></div><div class="set-list" style="margin-top:4px">
     <div class="set-row"><div><div class="t">Stop left-over helpers on their own</div><div class="d">The recorder checks once a minute and ends idle shells (cmd, PowerShell, bash) left over from closed apps, once they have been idle for the time below. Never anything with a window, anything that looks like a server, anything of Windows, or other users' processes. Off by default.</div></div><label class="switch"><input type="checkbox" id="autoclean" ${d.auto ? 'checked' : ''} aria-label="Stop left-over helpers on their own"><span></span></label></div>
-    <div class="set-row"><div><div class="t">Idle for at least</div><div class="d">${d.auto ? 'Right now this would stop' : 'If it were on, it would stop'} ${autoN} item${autoN === 1 ? '' : 's'} right now.</div></div><select class="select" id="automin">${[10, 15, 30, 60].map(n => `<option value="${n}" ${d.auto_minutes === n ? 'selected' : ''}>${n} minutes</option>`).join('')}</select></div>
-  </div><div class="panel-body"><div class="muted" style="font-size:12px;margin-bottom:4px">Recently stopped</div>${log}</div></section>`;
+    <div class="set-row"><div><div class="t">Free RAM from idle apps</div><div class="d">When memory in use reaches the level below, the recorder checks once a minute and asks Windows to move the memory of apps idle for the time below out of RAM. Nothing is closed and nothing is lost: an app reads back what it needs when you use it again, so it may pause for a moment then. Never the app in front, this app, Windows' own programs, or other users' processes. On by default.</div></div><label class="switch"><input type="checkbox" id="ramclean" ${d.ram ? 'checked' : ''} aria-label="Free RAM from idle apps"><span></span></label></div>
+    <div class="set-row"><div><div class="t">When memory in use reaches</div><div class="d">Memory in use is ${p ? pct(p.mem_pct) : 'unknown'} right now${d.ram && p && p.mem_pct >= d.ram_pct ? ', so idle apps are being freed' : ''}.</div></div><select class="select" id="rampct">${[70, 75, 80, 85, 90].map(n => `<option value="${n}" ${d.ram_pct === n ? 'selected' : ''}>${n}%</option>`).join('')}</select></div>
+    <div class="set-row"><div><div class="t">Idle for at least</div><div class="d">Used by both switches above. Left-over helpers it ${d.auto ? 'would stop' : 'would stop if that were on'} right now: ${autoN}.</div></div><select class="select" id="automin">${[10, 15, 30, 60].map(n => `<option value="${n}" ${d.auto_minutes === n ? 'selected' : ''}>${n} minutes</option>`).join('')}</select></div>
+  </div><div class="panel-body"><div class="muted" style="font-size:12px;margin-bottom:4px">Recently cleaned up</div>${log}</div></section>`;
 }
 
 /* ---------- Storage ---------- */
@@ -1692,6 +1698,8 @@ document.addEventListener('change', async e => {
     return;
   }
   if (t.id === 'autoclean') { await act(invoke('set_auto_cleanup', { on: t.checked, minutes: null }), t.checked ? 'Idle shells left over from closed apps will be stopped automatically' : 'Automatic clean-up is off'); quietRefresh.cleanAt = 0; return render(); }
+  if (t.id === 'ramclean') { await act(invoke('set_ram_clean', { on: t.checked, pct: null }), t.checked ? 'Idle apps are freed from RAM when memory runs low' : 'The RAM cleaner is off'); quietRefresh.cleanAt = 0; return render(); }
+  if (t.id === 'rampct') { await act(invoke('set_ram_clean', { on: !!document.getElementById('ramclean')?.checked, pct: Number(t.value) })); t.blur(); quietRefresh.cleanAt = 0; return render(); }
   if (t.id === 'automin') { await act(invoke('set_auto_cleanup', { on: !!document.getElementById('autoclean')?.checked, minutes: Number(t.value) })); t.blur(); quietRefresh.cleanAt = 0; return render(); }
 });
 let runT;

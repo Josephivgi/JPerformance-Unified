@@ -122,6 +122,33 @@ fn storage(root: Option<&String>) -> Result<(), String> {
 }
 
 /// `--cleanup` lists every cache with its size. `--cleanup clear <id>...` clears the named ones.
+/// One RAM cleaner pass right now, whatever memory in use is: frees the memory of apps idle for at least
+/// `minutes` (default: the clean-up setting) and prints what moved out of RAM. Nothing is closed.
+fn free_ram_cli(args: &[String]) -> Result<(), String> {
+    attach_console();
+    let conn = local::db::open(&paths::local_db()).map_err(|e| e.to_string())?;
+    let minutes = match args.first() {
+        Some(m) => m.parse::<i64>().map_err(|_| "usage: --free-ram [idle minutes]".to_string())?,
+        None => local::db::setting_i64(&conn, local::db::KEY_AUTO_CLEANUP_MIN, local::db::DEFAULT_AUTO_CLEANUP_MIN),
+    };
+    let activity: std::collections::HashMap<(u32, i64), (u64, i64)> =
+        local::db::activity(&conn).map_err(|e| e.to_string())?.into_iter().map(|(k, at)| (k, (0, at))).collect();
+    let mut sys = local::tree::snapshot();
+    sys.refresh_memory();
+    let before = sys.used_memory();
+    let ts = chrono::Utc::now().timestamp();
+    let freed = local::ramclean::run(&sys, &activity, &mut Default::default(), ts, minutes.max(0) * 60, local::tree::my_session());
+    let mb = |b: u64| b as f64 / 1_048_576.0;
+    for f in &freed {
+        println!("{:<40} {:>3} process{}  freed {:>8.1} MB", f.app, f.procs, if f.procs == 1 { " " } else { "es" }, mb(f.bytes));
+    }
+    let mut after = sysinfo::System::new();
+    after.refresh_memory();
+    println!("idle at least {minutes} min: {} apps, {:.1} MB moved out of RAM; memory in use {:.0} MB -> {:.0} MB",
+        freed.len(), mb(freed.iter().map(|f| f.bytes).sum()), mb(before), mb(after.used_memory()));
+    Ok(())
+}
+
 fn cleanup_cli(args: &[String]) -> Result<(), String> {
     attach_console();
     let mb = |v: &serde_json::Value| v.as_f64().unwrap_or(0.0) / 1e6;
@@ -217,6 +244,12 @@ fn main() {
         }
         Some("--cleanup") => {
             if let Err(e) = cleanup_cli(&args[1..]) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        Some("--free-ram") => {
+            if let Err(e) = free_ram_cli(&args[1..]) {
                 eprintln!("{e}");
                 std::process::exit(1);
             }

@@ -514,13 +514,15 @@ fn cores() -> f64 {
 /// Every app with what it started, and what is worth cleaning up.
 #[tauri::command]
 async fn pc_tree(app: tauri::State<'_, App>) -> Res {
-    let (activity, log, auto, minutes) = {
+    let (activity, log, auto, minutes, ram, ram_pct) = {
         let l = app.local.get()?;
         (
             ldb::activity(&l).map_err(e)?,
             ldb::cleanup_log(&l, 30).map_err(e)?,
             ldb::setting_i64(&l, ldb::KEY_AUTO_CLEANUP, 0) != 0,
             ldb::setting_i64(&l, ldb::KEY_AUTO_CLEANUP_MIN, ldb::DEFAULT_AUTO_CLEANUP_MIN),
+            ldb::setting_i64(&l, ldb::KEY_RAM_CLEAN, 1) != 0,
+            ldb::setting_i64(&l, ldb::KEY_RAM_CLEAN_PCT, ldb::DEFAULT_RAM_CLEAN_PCT),
         )
     };
     let held = app.procs.lock().unwrap().take();
@@ -554,6 +556,9 @@ async fn pc_tree(app: tauri::State<'_, App>) -> Res {
         "log": log,
         "auto": auto,
         "auto_minutes": minutes,
+        "ram": ram,
+        "ram_pct": ram_pct,
+        "ram_reason": ldb::RAM_CLEAN_REASON,
         "orphan_idle": tree::ORPHAN_IDLE_SECS,
         "agent_idle": tree::AGENT_IDLE_SECS,
     }))
@@ -594,6 +599,16 @@ async fn set_auto_cleanup(app: tauri::State<'_, App>, on: bool, minutes: Option<
     ldb::set_setting(&l, ldb::KEY_AUTO_CLEANUP, if on { "1" } else { "0" }).map_err(e)?;
     if let Some(m) = minutes {
         ldb::set_setting(&l, ldb::KEY_AUTO_CLEANUP_MIN, &m.clamp(5, 24 * 60).to_string()).map_err(e)?;
+    }
+    Ok(json!(true))
+}
+
+#[tauri::command]
+async fn set_ram_clean(app: tauri::State<'_, App>, on: bool, pct: Option<i64>) -> Res {
+    let l = app.local.get()?;
+    ldb::set_setting(&l, ldb::KEY_RAM_CLEAN, if on { "1" } else { "0" }).map_err(e)?;
+    if let Some(p) = pct {
+        ldb::set_setting(&l, ldb::KEY_RAM_CLEAN_PCT, &p.clamp(50, 99).to_string()).map_err(e)?;
     }
     Ok(json!(true))
 }
@@ -1117,6 +1132,7 @@ pub fn run(smoke: bool) -> Result<(), String> {
             pc_tree,
             stop_tree,
             set_auto_cleanup,
+            set_ram_clean,
             storage_status,
             storage_scan,
             storage_cancel,

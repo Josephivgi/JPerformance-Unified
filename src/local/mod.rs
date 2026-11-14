@@ -6,6 +6,7 @@ pub mod describe;
 pub mod insights;
 pub mod junk;
 pub mod procs;
+pub mod ramclean;
 pub mod recorder;
 pub mod apps;
 pub mod storage;
