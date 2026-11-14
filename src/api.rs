@@ -360,6 +360,7 @@ async fn sidebar(app: tauri::State<'_, App>) -> Res {
         "retention": ldb::setting_i64(&l, ldb::KEY_RETENTION, ldb::DEFAULT_RETENTION),
         "version": update::CURRENT,
         "cleanup_n": app.cleanup_n.lock().unwrap().filter(|(at, _)| at.elapsed() < Duration::from_secs(300)).map(|(_, n)| n),
+        "leaks": ldb::leak_count(&l).unwrap_or(0),
         "pressure": pressure(&l),
     }))
 }
@@ -611,6 +612,93 @@ async fn set_ram_clean(app: tauri::State<'_, App>, on: bool, pct: Option<i64>) -
         ldb::set_setting(&l, ldb::KEY_RAM_CLEAN_PCT, &p.clamp(50, 99).to_string()).map_err(e)?;
     }
     Ok(json!(true))
+}
+
+// ---------- RAM auto clean-up ----------
+
+/// What the RAM cleaner did, and which apps it has caught leaking memory.
+#[tauri::command]
+async fn ram_cleanup(app: tauri::State<'_, App>) -> Res {
+    let l = app.local.get()?;
+    let on = ldb::setting_i64(&l, ldb::KEY_RAM_CLEAN, 1) != 0;
+    let level = ldb::setting_i64(&l, ldb::KEY_RAM_CLEAN_PCT, ldb::DEFAULT_RAM_CLEAN_PCT);
+    let idle_min = ldb::setting_i64(&l, ldb::KEY_AUTO_CLEANUP_MIN, ldb::DEFAULT_AUTO_CLEANUP_MIN);
+    let latest = ldb::latest_sample(&l).map_err(e)?;
+    let runs = ldb::ram_runs(&l, 40).map_err(e)?;
+    let (freed, passes, last) = ldb::ram_run_totals(&l).map_err(e)?;
+    let since = now() - ldb::RAM_RUN_HISTORY_DAYS * 86_400;
+    let by_app: Vec<Value> = ldb::ram_freed_by_app(&l, since)
+        .map_err(e)?
+        .into_iter()
+        .map(|(app, bytes, times, last)| {
+            let name = ldesc::summary_name(&app, ldb::app_description(&l, &app).ok().flatten().as_deref());
+            json!({ "app": app, "name": name, "freed": bytes, "times": times, "last": last })
+        })
+        .collect();
+    let leaks = ldb::leaks(&l)
+        .map_err(e)?
+        .into_iter()
+        .map(|mut k| {
+            k.name = ldesc::summary_name(&k.app, ldb::app_description(&l, &k.app).ok().flatten().as_deref());
+            k
+        })
+        .collect::<Vec<_>>();
+    let (mem_used, mem_total, mem_pct) = latest.as_ref().map(|(p, total)| (p.mem_used as u64, *total, p.mem_pct)).unwrap_or((0, 0, 0.0));
+    Ok(json!({
+        "on": on,
+        "level": level,
+        "idle_min": idle_min,
+        "mem_used": mem_used,
+        "mem_total": mem_total,
+        "mem_pct": mem_pct,
+        "runs": runs,
+        "total": { "freed": freed, "passes": passes, "last": last },
+        "by_app": by_app,
+        "leaks": leaks,
+        "reason": ldb::RAM_CLEAN_REASON,
+    }))
+}
+
+/// One pass of the RAM cleaner, asked for from the page. Nothing is closed.
+#[tauri::command]
+async fn ram_free_now(app: tauri::State<'_, App>) -> Res {
+    let idle_min = {
+        let l = app.local.get()?;
+        ldb::setting_i64(&l, ldb::KEY_AUTO_CLEANUP_MIN, ldb::DEFAULT_AUTO_CLEANUP_MIN).max(1)
+    };
+    let ts = now();
+    let pass = tauri::async_runtime::spawn_blocking(move || {
+        let mut sys = tree::snapshot();
+        sys.refresh_memory();
+        let before = sys.used_memory();
+        let total = sys.total_memory().max(1);
+        let conn = ldb::open(&paths::local_db()).map_err(e)?;
+        let level = ldb::setting_i64(&conn, ldb::KEY_RAM_CLEAN_PCT, ldb::DEFAULT_RAM_CLEAN_PCT);
+        let activity: HashMap<(u32, i64), (u64, i64)> =
+            ldb::activity(&conn).map_err(e)?.into_iter().map(|(k, at)| (k, (0, at))).collect();
+        let freed = crate::local::ramclean::run(&sys, &activity, &mut HashMap::new(), ts, idle_min * 60, tree::my_session());
+        let mut after_sys = sysinfo::System::new();
+        after_sys.refresh_memory();
+        let after = after_sys.used_memory();
+        let bytes: u64 = freed.iter().map(|f| f.bytes).sum();
+        let procs: usize = freed.iter().map(|f| f.procs).sum();
+        if bytes > 0 {
+            for f in &freed {
+                let _ = ldb::log_cleanup(&conn, ts, &f.app, f.procs, f.bytes, ldb::RAM_CLEAN_REASON, false);
+            }
+            let _ = ldb::log_ram_run(&conn, ts, before, total, after, level, freed.len(), procs, bytes, false);
+        }
+        Ok::<Value, String>(json!({
+            "freed": bytes,
+            "procs": procs,
+            "mem_before": before,
+            "mem_after": after,
+            "apps": freed.iter().map(|f| json!({ "app": f.app, "procs": f.procs, "bytes": f.bytes })).collect::<Vec<_>>(),
+        }))
+    })
+    .await
+    .map_err(e)?;
+    Ok(pass?)
 }
 
 // ---------- Storage ----------
@@ -1133,6 +1221,8 @@ pub fn run(smoke: bool) -> Result<(), String> {
             stop_tree,
             set_auto_cleanup,
             set_ram_clean,
+            ram_cleanup,
+            ram_free_now,
             storage_status,
             storage_scan,
             storage_cancel,

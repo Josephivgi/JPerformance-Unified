@@ -80,6 +80,32 @@ CREATE TABLE IF NOT EXISTS cleanup_log (
     reason TEXT    NOT NULL,
     auto   INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ram_runs (
+    id        INTEGER PRIMARY KEY,
+    ts        INTEGER NOT NULL,
+    mem_used  INTEGER NOT NULL,
+    mem_total INTEGER NOT NULL,
+    mem_after INTEGER NOT NULL,
+    level     INTEGER NOT NULL,
+    apps      INTEGER NOT NULL,
+    procs     INTEGER NOT NULL,
+    freed     INTEGER NOT NULL,
+    auto      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ram_runs_ts ON ram_runs(ts);
+CREATE TABLE IF NOT EXISTS leak_finds (
+    app      TEXT PRIMARY KEY,
+    first_ts INTEGER NOT NULL,
+    last_ts  INTEGER NOT NULL,
+    gone_ts  INTEGER NOT NULL DEFAULT 0,
+    from_mem INTEGER NOT NULL,
+    peak_mem INTEGER NOT NULL,
+    rate     REAL    NOT NULL,
+    hours    REAL    NOT NULL,
+    cpu      REAL    NOT NULL,
+    series   TEXT,
+    resolved INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS storage_cleans (
     id    INTEGER PRIMARY KEY,
     ts    INTEGER NOT NULL,
@@ -195,6 +221,8 @@ pub const KEY_RAM_CLEAN_PCT: &str = "ram_clean_pct";
 pub const DEFAULT_RAM_CLEAN_PCT: i64 = 85;
 /// Reason written to the clean-up log for memory the RAM cleaner freed.
 pub const RAM_CLEAN_REASON: &str = "Freed memory while idle";
+/// How many days of RAM cleaner passes the RAM page keeps.
+pub const RAM_RUN_HISTORY_DAYS: i64 = 30;
 
 /// Developer option: update checks go through the user's signed-in GitHub CLI. Off by default.
 pub const KEY_USE_GH: &str = "update_use_gh";
@@ -339,7 +367,8 @@ pub fn prune(conn: &Connection, older_than: i64) -> Result<usize> {
     let a = conn.execute("DELETE FROM system_samples WHERE ts < ?1", [older_than])?;
     let b = conn.execute("DELETE FROM app_minutes WHERE minute < ?1", [older_than])?;
     let c = conn.execute("DELETE FROM cleanup_log WHERE ts < ?1", [older_than])?;
-    Ok(a + b + c)
+    let d = conn.execute("DELETE FROM ram_runs WHERE ts < ?1", [older_than])?;
+    Ok(a + b + c + d)
 }
 
 // ---------- process activity and clean-up ----------
@@ -388,6 +417,194 @@ pub fn cleanup_log(conn: &Connection, limit: usize) -> Result<Vec<CleanupEntry>>
         Ok(CleanupEntry { ts: r.get(0)?, name: r.get(1)?, procs: r.get(2)?, mem: r.get(3)?, reason: r.get(4)?, auto: r.get::<_, i64>(5)? != 0 })
     })?;
     rows.collect()
+}
+
+// ---------- RAM cleaner passes and memory leaks ----------
+
+/// One pass of the RAM cleaner: memory in use before and after, and what moved out of RAM.
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct RamRun {
+    pub ts: i64,
+    pub mem_used: i64,
+    pub mem_total: i64,
+    pub mem_after: i64,
+    pub level: i64,
+    pub apps: i64,
+    pub procs: i64,
+    pub freed: i64,
+    pub auto: bool,
+    /// What was trimmed in this pass, biggest first.
+    pub items: Vec<RamRunItem>,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct RamRunItem {
+    pub app: String,
+    pub procs: i64,
+    pub mem: i64,
+}
+
+/// Records a pass of the RAM cleaner and returns its id.
+#[allow(clippy::too_many_arguments)]
+pub fn log_ram_run(conn: &Connection, ts: i64, mem_used: u64, mem_total: u64, mem_after: u64, level: i64, apps: usize, procs: usize, freed: u64, auto: bool) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO ram_runs(ts, mem_used, mem_total, mem_after, level, apps, procs, freed, auto) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![ts, mem_used as i64, mem_total as i64, mem_after as i64, level, apps as i64, procs as i64, freed as i64, auto as i64],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// The last `limit` RAM cleaner passes, newest first, with the apps each one trimmed.
+pub fn ram_runs(conn: &Connection, limit: usize) -> Result<Vec<RamRun>> {
+    let mut stmt = conn.prepare(
+        "SELECT ts, mem_used, mem_total, mem_after, level, apps, procs, freed, auto FROM ram_runs ORDER BY ts DESC LIMIT ?1",
+    )?;
+    let mut runs: Vec<RamRun> = stmt
+        .query_map([limit as i64], |r| {
+            Ok(RamRun {
+                ts: r.get(0)?,
+                mem_used: r.get(1)?,
+                mem_total: r.get(2)?,
+                mem_after: r.get(3)?,
+                level: r.get(4)?,
+                apps: r.get(5)?,
+                procs: r.get(6)?,
+                freed: r.get(7)?,
+                auto: r.get::<_, i64>(8)? != 0,
+                items: Vec::new(),
+            })
+        })?
+        .collect::<Result<_>>()?;
+    // The clean-up log rows of a pass carry the same timestamp, so they group back together exactly.
+    let mut items: std::collections::HashMap<i64, Vec<RamRunItem>> = std::collections::HashMap::new();
+    let mut stmt = conn.prepare("SELECT ts, name, procs, mem FROM cleanup_log WHERE reason = ?1 ORDER BY ts DESC, id DESC LIMIT ?2")?;
+    let rows = stmt.query_map(params![RAM_CLEAN_REASON, (limit * 20) as i64], |r| {
+        Ok((r.get::<_, i64>(0)?, RamRunItem { app: r.get(1)?, procs: r.get(2)?, mem: r.get(3)? }))
+    })?;
+    for row in rows {
+        let (ts, item) = row?;
+        items.entry(ts).or_default().push(item);
+    }
+    for run in &mut runs {
+        run.items = items.remove(&run.ts).unwrap_or_default();
+    }
+    Ok(runs)
+}
+
+/// All the memory the RAM cleaner has freed: (bytes, how many passes, when the last one was).
+pub fn ram_run_totals(conn: &Connection) -> Result<(i64, i64, Option<i64>)> {
+    conn.query_row("SELECT COALESCE(SUM(freed), 0), COUNT(*), MAX(ts) FROM ram_runs", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+}
+
+/// What the RAM cleaner freed per app, biggest first: (app, bytes, times, when last).
+pub fn ram_freed_by_app(conn: &Connection, since: i64) -> Result<Vec<(String, i64, i64, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT name, SUM(mem), COUNT(*), MAX(ts) FROM cleanup_log WHERE reason = ?1 AND ts >= ?2 GROUP BY name ORDER BY SUM(mem) DESC LIMIT 40",
+    )?;
+    let rows = stmt.query_map(params![RAM_CLEAN_REASON, since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+    rows.collect()
+}
+
+/// An app whose memory kept climbing and never came back down.
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct Leak {
+    pub app: String,
+    pub name: String,
+    /// When it was first found and when it was last seen growing.
+    pub first_ts: i64,
+    pub last_ts: i64,
+    /// Memory it had when it was first seen growing, and the most it reached.
+    pub from_mem: i64,
+    pub peak_mem: i64,
+    /// Bytes an hour it was gaining, and how long it was watched.
+    pub rate: f64,
+    pub hours: f64,
+    /// Average CPU while it grew: low means the growth was not work.
+    pub cpu: f64,
+    /// Its memory every few minutes, for the chart on the page.
+    pub series: Vec<(i64, i64)>,
+    /// True once it stopped climbing (it was closed, or it let the memory go), and when that was.
+    pub resolved: bool,
+    pub gone_ts: i64,
+    /// The last time memory was freed from it by the RAM cleaner.
+    pub freed_at: Option<i64>,
+    pub freed: i64,
+}
+
+pub struct LeakRow {
+    pub app: String,
+    pub first_ts: i64,
+    pub last_ts: i64,
+    pub from_mem: i64,
+    pub peak_mem: i64,
+    pub rate: f64,
+    pub hours: f64,
+    pub cpu: f64,
+    pub series: String,
+}
+
+/// Writes a leak found again, keeping the first time it was seen and the most it has reached.
+pub fn upsert_leak(conn: &Connection, l: &LeakRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO leak_finds(app, first_ts, last_ts, gone_ts, from_mem, peak_mem, rate, hours, cpu, series, resolved)
+         VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7, ?8, ?9, 0)
+         ON CONFLICT(app) DO UPDATE SET last_ts = excluded.last_ts, gone_ts = 0,
+             first_ts = CASE WHEN leak_finds.resolved = 1 THEN excluded.first_ts ELSE MIN(leak_finds.first_ts, excluded.first_ts) END,
+             from_mem = CASE WHEN leak_finds.resolved = 1 THEN excluded.from_mem ELSE MIN(leak_finds.from_mem, excluded.from_mem) END,
+             peak_mem = MAX(leak_finds.peak_mem, excluded.peak_mem),
+             rate = excluded.rate, hours = excluded.hours, cpu = excluded.cpu, series = excluded.series, resolved = 0",
+        params![l.app, l.first_ts, l.last_ts, l.from_mem, l.peak_mem, l.rate, l.hours, l.cpu, l.series],
+    )?;
+    Ok(())
+}
+
+/// Marks a leak as no longer growing, keeping when it stopped.
+pub fn resolve_leak(conn: &Connection, app: &str, ts: i64) -> Result<()> {
+    conn.execute("UPDATE leak_finds SET resolved = 1, gone_ts = ?2 WHERE app = ?1 AND resolved = 0", params![app, ts])?;
+    Ok(())
+}
+
+/// Apps still listed as leaking, to check again for one that has stopped.
+pub fn unresolved_leaks(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT app FROM leak_finds WHERE resolved = 0")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    rows.collect()
+}
+
+/// The leaks found, still growing first.
+pub fn leaks(conn: &Connection) -> Result<Vec<Leak>> {
+    let mut stmt = conn.prepare(
+        "SELECT l.app, l.first_ts, l.last_ts, l.from_mem, l.peak_mem, l.rate, l.hours, l.cpu, l.series, l.resolved, l.gone_ts,
+                (SELECT MAX(ts) FROM cleanup_log WHERE reason = ?1 AND name = l.app), (SELECT COALESCE(SUM(mem), 0) FROM cleanup_log WHERE reason = ?1 AND name = l.app)
+         FROM leak_finds l ORDER BY l.resolved, l.rate DESC",
+    )?;
+    let rows = stmt.query_map([RAM_CLEAN_REASON], |r| {
+        let series: Option<String> = r.get(8)?;
+        // The page names each app from its description; this is the program file until it does.
+        let app: String = r.get(0)?;
+        Ok(Leak {
+            name: app.clone(),
+            app,
+            first_ts: r.get(1)?,
+            last_ts: r.get(2)?,
+            from_mem: r.get(3)?,
+            peak_mem: r.get(4)?,
+            rate: r.get(5)?,
+            hours: r.get(6)?,
+            cpu: r.get(7)?,
+            series: series.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+            resolved: r.get::<_, i64>(9)? != 0,
+            gone_ts: r.get(10)?,
+            freed_at: r.get(11)?,
+            freed: r.get(12)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Number of leaks still growing, for the sidebar.
+pub fn leak_count(conn: &Connection) -> Result<i64> {
+    conn.query_row("SELECT COUNT(*) FROM leak_finds WHERE resolved = 0", [], |r| r.get(0))
 }
 
 /// Notes disk space freed by clearing caches or emptying the Recycle Bin.

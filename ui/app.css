@@ -315,6 +315,9 @@ body { background: var(--plane); overflow: hidden; }
 .tbl tbody tr.click { cursor: pointer; }
 .tbl tbody tr.click:hover td { background: var(--surface-2); }
 .tbl tr.sel td { background: var(--accent-wash); }
+/* A memory line inside a table row, for a leak's climb: fixed width so the row keeps its shape. */
+.tbl td.sparkcell, .tbl th.sparkcell { width: 150px; min-width: 110px; padding-left: 8px; padding-right: 8px; }
+.tbl td.sparkcell .spark { height: 30px; }
 .wrap-x { overflow-x: auto; }
 
 /* ---------- Charts ---------- */

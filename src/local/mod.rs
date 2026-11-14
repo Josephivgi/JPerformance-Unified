@@ -5,6 +5,7 @@ pub mod db;
 pub mod describe;
 pub mod insights;
 pub mod junk;
+pub mod leaks;
 pub mod procs;
 pub mod ramclean;
 pub mod recorder;

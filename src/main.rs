@@ -121,9 +121,45 @@ fn storage(root: Option<&String>) -> Result<(), String> {
     Ok(())
 }
 
-/// `--cleanup` lists every cache with its size. `--cleanup clear <id>...` clears the named ones.
-/// One RAM cleaner pass right now, whatever memory in use is: frees the memory of apps idle for at least
-/// `minutes` (default: the clean-up setting) and prints what moved out of RAM. Nothing is closed.
+/// A time as local "month-day hour:minute".
+fn stamp(fmt: &str) -> impl Fn(i64) -> String + '_ {
+    move |ts| {
+        use chrono::TimeZone;
+        chrono::Local.timestamp_opt(ts, 0).single().map(|d| d.format(fmt).to_string()).unwrap_or_default()
+    }
+}
+
+/// `--leaks` looks for apps whose memory keeps climbing and prints them. Read-only.
+fn leaks_cli() -> Result<(), String> {
+    attach_console();
+    let conn = local::db::open(&paths::local_db()).map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().timestamp();
+    let found = local::leaks::detect(&conn, now).map_err(|e| e.to_string())?;
+    let mb = |b: i64| b as f64 / 1_048_576.0;
+    println!("\nMemory leaks still growing: {}", found.len());
+    for l in local::db::leaks(&conn).map_err(|e| e.to_string())? {
+        println!(
+            "  {:<34} {:>7.0} -> {:>7.0} MB in {:.1} h (+{:.0} MB/h), {:.1}% CPU, {}{}",
+            l.name.chars().take(34).collect::<String>(),
+            mb(l.from_mem), mb(l.peak_mem), l.hours, l.rate / 1_048_576.0, l.cpu,
+            if l.resolved { "no longer growing" } else { "still growing" },
+            if l.freed > 0 { format!(", {} MB freed from it so far", l.freed / 1_048_576) } else { String::new() }
+        );
+    }
+    let (freed, passes, last) = local::db::ram_run_totals(&conn).map_err(|e| e.to_string())?;
+    println!("\nRAM cleaner: {passes} passes, {} MB freed in total, last {}", freed / 1_048_576,
+        last.map(stamp("%Y-%m-%d %H:%M")).unwrap_or_else(|| "never".into()));
+    for r in local::db::ram_runs(&conn, 10).map_err(|e| e.to_string())? {
+        println!("  {} {:>7.0} -> {:>7.0} MB, {} apps, {} procs, freed {} MB",
+            stamp("%m-%d %H:%M")(r.ts),
+            mb(r.mem_used), mb(r.mem_after), r.apps, r.procs, r.freed / 1_048_576);
+    }
+    Ok(())
+}
+
+/// `--free-ram [minutes]`: one RAM cleaner pass right now, whatever memory in use is. Frees the memory of
+/// apps idle for at least `minutes` (default: the clean-up setting) and prints what moved out of RAM.
+/// Nothing is closed, and the pass is listed on the RAM page with the ones the recorder does on its own.
 fn free_ram_cli(args: &[String]) -> Result<(), String> {
     attach_console();
     let conn = local::db::open(&paths::local_db()).map_err(|e| e.to_string())?;
@@ -144,11 +180,22 @@ fn free_ram_cli(args: &[String]) -> Result<(), String> {
     }
     let mut after = sysinfo::System::new();
     after.refresh_memory();
+    // A pass asked for here is listed on the RAM page with the ones the recorder does on its own.
+    if !freed.is_empty() {
+        let bytes: u64 = freed.iter().map(|f| f.bytes).sum();
+        let procs: usize = freed.iter().map(|f| f.procs).sum();
+        for f in &freed {
+            let _ = local::db::log_cleanup(&conn, ts, &f.app, f.procs, f.bytes, local::db::RAM_CLEAN_REASON, false);
+        }
+        let level = local::db::setting_i64(&conn, local::db::KEY_RAM_CLEAN_PCT, local::db::DEFAULT_RAM_CLEAN_PCT);
+        let _ = local::db::log_ram_run(&conn, ts, before, sys.total_memory(), after.used_memory(), level, freed.len(), procs, bytes, false);
+    }
     println!("idle at least {minutes} min: {} apps, {:.1} MB moved out of RAM; memory in use {:.0} MB -> {:.0} MB",
         freed.len(), mb(freed.iter().map(|f| f.bytes).sum()), mb(before), mb(after.used_memory()));
     Ok(())
 }
 
+/// `--cleanup` lists every cache with its size. `--cleanup clear <id>...` clears the named ones.
 fn cleanup_cli(args: &[String]) -> Result<(), String> {
     attach_console();
     let mb = |v: &serde_json::Value| v.as_f64().unwrap_or(0.0) / 1e6;
@@ -250,6 +297,12 @@ fn main() {
         }
         Some("--free-ram") => {
             if let Err(e) = free_ram_cli(&args[1..]) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        Some("--leaks") => {
+            if let Err(e) = leaks_cli() {
                 eprintln!("{e}");
                 std::process::exit(1);
             }

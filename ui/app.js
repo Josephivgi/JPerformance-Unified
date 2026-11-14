@@ -23,6 +23,7 @@ const I = {
   x: '<path d="m4 4 8 8M12 4l-8 8"/>',
   shield: '<path d="M8 1.8 13.2 3.8v4c0 3-2.2 5.3-5.2 6.4-3-1.1-5.2-3.4-5.2-6.4v-4z"/><path d="m5.8 8 1.6 1.6 2.9-3"/>',
   broom: '<path d="M10.5 1.8 7.4 7.2"/><path d="M4.2 7.4h6.4l1.2 6.8H3z"/><path d="M6 10.2v4M8.4 10.2v4"/>',
+  ram: '<rect x="1.5" y="4.6" width="13" height="6.8" rx="1.2"/><path d="M4.6 2.4v2.2M8 2.4v2.2M11.4 2.4v2.2"/><path d="M4.5 7.4v1.4M7 7.4v1.4M9.5 7.4v1.4M12 7.4v1.4"/>',
   download: '<path d="M8 2.2v8M4.6 7l3.4 3.4L11.4 7M2.6 13.6h10.8"/>',
   disk: '<rect x="1.8" y="4" width="12.4" height="8" rx="1.4"/><path d="M4.4 9.5h4M11.2 9.5h.1"/>',
   folder: '<path d="M1.8 4.2c0-.7.5-1.2 1.2-1.2h3l1.4 1.6H13c.7 0 1.2.5 1.2 1.2v6.2c0 .7-.5 1.2-1.2 1.2H3c-.7 0-1.2-.5-1.2-1.2z"/>',
@@ -333,6 +334,7 @@ function renderSide() {
       <div class="side-label"><span>This PC</span></div>
       ${pcRow}
       <button class="nav" ${S.page === 'machine' && S.machine === 'pc' && S.tab === 'cleanup' ? 'aria-current="page"' : ''} data-go="machine" data-m="pc" data-t="cleanup">${ic('broom')}Clean up${sd.cleanup_n ? `<span class="count">${sd.cleanup_n}</span>` : ''}</button>
+      <button class="nav" ${cur('ram')} data-go="ram">${ic('ram')}RAM Auto Cleanup${sd.leaks ? `<span class="count attn">${sd.leaks}</span>` : ''}</button>
       <button class="nav" ${S.page === 'machine' && S.machine === 'pc' && S.tab === 'storage' ? 'aria-current="page"' : ''} data-go="machine" data-m="pc" data-t="storage">${ic('disk')}Storage</button>
       <div class="side-label"><span>Servers</span><span>${sd.ssh ? (watchedN ? `${online} of ${watchedN} online` : 'None picked') : 'Off'}</span></div>
       ${sd.ssh ? servers.map(srvRow).join('') + `<button class="nav" ${cur('keys')} data-go="keys">${ic('key')}SSH keys</button>`
@@ -421,6 +423,66 @@ async function pageFindings() {
   </div>`;
 }
 
+/* ================= RAM Auto Cleanup ================= */
+// What the RAM cleaner did, and the apps whose memory keeps coming back: memory leaks.
+async function pageRamCleanup() {
+  const d = await invoke('ram_cleanup');
+  const runs = d.runs || [], leaks = d.leaks || [];
+  const open = leaks.filter(l => !l.resolved), gone = leaks.filter(l => l.resolved);
+  const total = d.total || { freed: 0, passes: 0, last: null };
+  const byApp = d.by_app || [];
+  const appN = new Set(byApp.map(a => a.app)).size;
+  const reach = d.mem_pct >= d.level;
+  const worst = [...open].sort((a, b) => b.rate - a.rate)[0];
+  const before = r => r.mem_total ? pct(100 * r.mem_used / r.mem_total) : '–';
+  const runRow = r => {
+    // Memory in use is read again right after a pass, but the PC carries on using it, so it is only worth
+    // showing when it clearly fell. What moved out of RAM is exact: it is measured per process.
+    const drop = r.mem_used - (r.mem_after || 0) > r.mem_total * 0.01;
+    const names = (r.items || []).map(i => `${esc(stem(i.app))} ${bytes(i.mem)}`);
+    const what = names.length ? names.slice(0, 3).join(', ') + (names.length > 3 ? ` and ${names.length - 3} more` : '') : `${r.apps} app${r.apps === 1 ? '' : 's'}`;
+    return `<tr><td><b style="font-weight:600">${when(r.ts)}</b><span class="sub">${r.auto ? 'On its own' : 'You asked for it'}</span></td>
+      <td class="wrap">${what}</td>
+      <td class="r num">${before(r)}<span class="sub">${bytes(r.mem_used)}${drop ? `, ${bytes(r.mem_after)} after` : ''}</span></td>
+      <td class="r num opt">${r.procs}</td><td><div class="barcell"><b>${bytes(r.freed)}</b>${bar(r.freed / Math.max(1, ...runs.map(x => x.freed)) * 100)}</div></td></tr>`;
+  };
+  const leakRow = l => {
+    const peaked = Math.max(1, ...leaks.map(x => x.peak_mem));
+    return `<tr ${l.resolved ? 'style="opacity:.62"' : ''}><td class="fill wrap"><b style="font-weight:600">${esc(l.name)}</b><span class="sub">${l.resolved ? `<span class="chip">Stopped ${ago(l.gone_ts)}</span> ` : ''}${esc(l.app)}${l.resolved ? '' : ` · since ${when(l.first_ts)}`}</span></td>
+      <td class="sparkcell">${spark((l.series || []).map(p => p[1]), peaked, 28)}</td>
+      <td class="r num">${bytes(l.from_mem)}<span class="sub">to ${bytes(l.peak_mem)}</span></td>
+      <td class="r num">${bytes(l.rate)}/h<span class="sub">for ${dur(l.hours * 3600)}</span></td>
+      <td class="r num opt">${pct(l.cpu)}<span class="sub">CPU then</span></td>
+      <td class="r opt2">${l.freed ? `${bytes(l.freed)}<span class="sub">${ago(l.freed_at)}</span>` : '<span class="muted">–</span>'}</td></tr>`;
+  };
+  const gap = S.side?.recorder ? '' : `<div class="empty">The recorder is not running, so nothing new is being measured. Start it from the sidebar.</div>`;
+  return head('RAM Auto Cleanup', `<span>${d.on ? 'On' : 'Off'}</span><span>Frees idle apps' memory when RAM reaches ${d.level}%</span><span>Looks for leaks in the last day</span>`, `<button class="btn" data-go="machine" data-m="pc" data-t="cleanup">${ic('broom')}Clean-up settings</button><button class="btn primary" data-action="ram-free">${ic('ram')}Free RAM now</button>`) + `
+  <div class="body">
+    <div class="summary">
+      <div><div class="k">Memory in use</div><div class="v ${d.mem_pct >= 90 ? 'crit' : ''}">${d.mem_total ? pct(d.mem_pct) : '–'}</div><div class="d">${d.mem_total ? ofBytes(d.mem_used, d.mem_total) : 'No reading yet'}${d.mem_total ? (reach ? ', so idle apps are freed' : `, under the ${d.level}% level`) : ''}</div></div>
+      <div><div class="k">Freed in total</div><div class="v">${bytes(total.freed)}</div><div class="d">${total.passes ? `in ${total.passes} pass${total.passes === 1 ? '' : 'es'}, from ${appN} app${appN === 1 ? '' : 's'}` : 'Nothing freed yet'}</div></div>
+      <div><div class="k">Last pass</div><div class="v one">${total.last ? ago(total.last) : 'None yet'}</div><div class="d">${runs[0] ? `${bytes(runs[0].freed)} from ${runs[0].procs} process${runs[0].procs === 1 ? '' : 'es'}` : `Apps idle for ${d.idle_min} min or more`}</div></div>
+      <div><div class="k">Memory leaks found</div><div class="v ${open.length ? 'crit' : ''}">${open.length}</div><div class="d one">${open.length ? `${esc(worst.name)}, +${bytes(worst.rate)} an hour` : 'None still growing'}</div></div>
+    </div>
+    <section class="panel"><div class="panel-head"><h2>What it did</h2><span class="hint">Each pass moves the memory of apps that have been idle out of RAM and onto disk. Nothing is closed: an app reads back what it needs when you use it again, so it may pause for a moment then. It never touches the app in front, this app, Windows' own programs, or other users' processes.</span></div>
+      ${gap}
+      ${runs.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th>When</th><th>What was trimmed</th><th class="r">Memory in use</th><th class="r opt">Processes</th><th style="width:170px">Moved out of RAM</th></tr></thead><tbody>${runs.slice(0, S.showAll.has('ramruns') ? runs.length : 20).map(runRow).join('')}</tbody></table></div>
+        ${runs.length > 20 && !S.showAll.has('ramruns') ? `<div class="panel-body toolbar"><span class="muted grow">Showing the last 20 of ${runs.length} passes.</span><button class="btn small ghost" data-showall="ramruns">Show all</button></div>` : ''}`
+        : `<div class="empty">Nothing yet. When memory in use reaches ${d.level}%, the recorder frees the memory of apps idle for ${d.idle_min} minutes or more, and the pass is listed here.</div>`}</section>
+    <section class="panel"><div class="panel-head"><h2>Memory leaks it found</h2><span class="hint">An app that keeps taking memory for hours and never gives it back: it grows while doing little, and the memory stays high when it is idle. Closing and reopening the app gives it a fresh start. The memory freed from a leak below comes straight back, which is how it shows.</span></div>
+      ${open.length || gone.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th>App</th><th class="sparkcell">Last day</th><th class="r">Grew</th><th class="r">Speed</th><th class="r opt">While it grew</th><th class="r opt2">Freed by the cleaner</th></tr></thead><tbody>
+        ${open.map(leakRow).join('')}
+        ${gone.length ? `<tr class="dup-h"><td colspan="6"><b style="font-weight:600">No longer growing</b> <span class="muted">· it was closed, or it let the memory go</span></td></tr>${gone.slice(0, 10).map(leakRow).join('')}` : ''}
+        </tbody></table></div>`
+        : `<div class="empty">No leak right now. The recorder looks again every 5 minutes, at apps that have been running for hours, so one that starts leaking shows up within a couple of hours.</div>`}</section>
+    <section class="panel"><div class="panel-head"><h2>Where the memory came from</h2><span class="hint">Every pass adds up here, so an app that is emptied again and again shows at the top.</span></div>
+      ${byApp.length ? `<div class="wrap-x"><table class="tbl freeze"><thead><tr><th>App</th><th class="r">Times freed</th><th class="r">Last time</th><th style="width:220px">Freed in total</th></tr></thead><tbody>
+        ${byApp.slice(0, S.showAll.has('ramapps') ? byApp.length : 12).map(a => `<tr><td class="fill wrap"><b style="font-weight:600">${esc(a.name || stem(a.app))}</b><span class="sub">${esc(a.app)}</span></td>
+          <td class="r num">${a.times}</td><td class="r">${ago(a.last)}</td><td><div class="barcell"><b>${bytes(a.freed)}</b>${bar(a.freed / Math.max(1, ...byApp.map(x => x.freed)) * 100)}</div></td></tr>`).join('')}
+        </tbody></table></div>${byApp.length > 12 && !S.showAll.has('ramapps') ? `<div class="panel-body toolbar"><span class="muted grow">Showing the ${12} biggest.</span><button class="btn small ghost" data-showall="ramapps">Show all</button></div>` : ''}`
+        : '<div class="empty">Nothing freed yet.</div>'}</section>
+  </div>`;
+}
 /* ================= This PC ================= */
 // Axis labels: two significant digits below 1%, otherwise one decimal only when needed, so labels never repeat.
 const cpuFmt = (v, axis) => axis ? (!v ? 0 : v < 1 ? +v.toPrecision(2) : v % 1 ? +v.toFixed(1) : Math.round(v)) + '%' : pct(v);
@@ -680,7 +742,7 @@ async function pcCleanup() {
     <div class="set-row"><div><div class="t">Free RAM from idle apps</div><div class="d">When memory in use reaches the level below, the recorder checks once a minute and asks Windows to move the memory of apps idle for the time below out of RAM. Nothing is closed and nothing is lost: an app reads back what it needs when you use it again, so it may pause for a moment then. Never the app in front, this app, Windows' own programs, or other users' processes. On by default.</div></div><label class="switch"><input type="checkbox" id="ramclean" ${d.ram ? 'checked' : ''} aria-label="Free RAM from idle apps"><span></span></label></div>
     <div class="set-row"><div><div class="t">When memory in use reaches</div><div class="d">Memory in use is ${p ? pct(p.mem_pct) : 'unknown'} right now${d.ram && p && p.mem_pct >= d.ram_pct ? ', so idle apps are being freed' : ''}.</div></div><select class="select" id="rampct">${[70, 75, 80, 85, 90].map(n => `<option value="${n}" ${d.ram_pct === n ? 'selected' : ''}>${n}%</option>`).join('')}</select></div>
     <div class="set-row"><div><div class="t">Idle for at least</div><div class="d">Used by both switches above. Left-over helpers it ${d.auto ? 'would stop' : 'would stop if that were on'} right now: ${autoN}.</div></div><select class="select" id="automin">${[10, 15, 30, 60].map(n => `<option value="${n}" ${d.auto_minutes === n ? 'selected' : ''}>${n} minutes</option>`).join('')}</select></div>
-  </div><div class="panel-body"><div class="muted" style="font-size:12px;margin-bottom:4px">Recently cleaned up</div>${log}</div></section>`;
+  </div><div class="panel-body"><div class="toolbar"><span class="muted grow" style="font-size:12px">Recently cleaned up</span><button class="btn small ghost" data-go="ram">${ic('ram')}RAM Auto Cleanup</button></div>${log}</div></section>`;
 }
 
 /* ---------- Storage ---------- */
@@ -1482,6 +1544,7 @@ async function renderPage(gen, scrollTop, quiet) {
     html = S.page === 'overview' ? await pageOverview()
       : S.page === 'findings' ? await pageFindings()
       : S.page === 'keys' ? await pageKeys()
+      : S.page === 'ram' ? await pageRamCleanup()
       : S.page === 'settings' ? await pageSettings()
       : S.machine === 'pc' ? await pagePC() : await pageServer(S.machine);
   } catch (e) {
@@ -1582,6 +1645,13 @@ document.addEventListener('click', async e => {
   if (t.hasAttribute('data-unpin')) { S.pinned = null; return render(); }
   switch (ds.action) {
     case 'refresh': S.keys = null; S.rescan = S.page === 'settings'; momentCache.clear(); return render();
+    case 'ram-free': {
+      const r = await act(invoke('ram_free_now'));
+      if (!r) return;
+      return r.freed > 0
+        ? (toast(`Freed ${bytes(r.freed)} of RAM from ${r.procs} idle process${r.procs === 1 ? '' : 'es'}. Nothing was closed.`), render())
+        : (toast('Nothing was idle long enough to free right now. Nothing was closed.'), render());
+    }
     case 'keys-again': S.keys = null; return render();
     case 'retry-page': return render(true);
     case 'start-recorder': keepFocus(); await act(invoke('start_recorder'), 'Recorder started'); return setTimeout(() => render(false, 'answer'), 1200);
@@ -1809,6 +1879,7 @@ async function smokeRun() {
   };
   await visit('overview', { page: 'overview', machine: null });
   await visit('findings', { page: 'findings', machine: null, range: 604800 });
+  await visit('ram', { page: 'ram', machine: null });
   for (const tab of ['now', 'cleanup', 'storage', 'history', 'apps', 'running', 'recordings', 'insights']) await visit('pc ' + tab, { page: 'machine', machine: 'pc', tab, range: 86400 });
   const app = (S.pcHead?.apps || [])[0]?.app;
   if (app) await visit('pc history ' + app, { page: 'machine', machine: 'pc', tab: 'history', histApp: app });

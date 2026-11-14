@@ -1,7 +1,7 @@
 //! Background collector. Runs as `JPerformance.exe --collector`, samples the whole
 //! system every few seconds and rolls per-app usage up into one row per minute.
 
-use super::{db, describe, procs, ramclean, tree};
+use super::{db, describe, leaks, procs, ramclean, tree};
 use crate::paths;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -74,6 +74,8 @@ pub fn run(stop: &AtomicBool) -> Result<(), String> {
     let my_session = tree::my_session();
     // When the RAM cleaner last trimmed each process, so it is not trimmed again every minute.
     let mut trimmed: HashMap<(u32, i64), i64> = HashMap::new();
+    // Leaks are looked for a few minutes apart, on the recorder's own samples.
+    let mut last_leak_check = Instant::now();
 
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -153,14 +155,31 @@ pub fn run(stop: &AtomicBool) -> Result<(), String> {
             }
             if db::setting_i64(&conn, db::KEY_RAM_CLEAN, 1) != 0 {
                 let level = db::setting_i64(&conn, db::KEY_RAM_CLEAN_PCT, db::DEFAULT_RAM_CLEAN_PCT).clamp(50, 99) as f64;
-                let used = sys.used_memory() as f64 * 100.0 / sys.total_memory().max(1) as f64;
-                if used >= level {
+                let before = sys.used_memory();
+                let total = sys.total_memory().max(1);
+                if before as f64 * 100.0 / total as f64 >= level {
                     let idle_for = db::setting_i64(&conn, db::KEY_AUTO_CLEANUP_MIN, db::DEFAULT_AUTO_CLEANUP_MIN).max(1) * 60;
-                    for f in ramclean::run(&sys, &activity, &mut trimmed, ts, idle_for, my_session) {
-                        log(&format!("RAM cleaner freed {} MB from {} ({} processes)", f.bytes / 1_048_576, f.app, f.procs));
-                        let _ = db::log_cleanup(&conn, ts, &f.app, f.procs, f.bytes, db::RAM_CLEAN_REASON, true);
+                    let freed = ramclean::run(&sys, &activity, &mut trimmed, ts, idle_for, my_session);
+                    if !freed.is_empty() {
+                        // Memory in use is read again so the page can show what the pass moved out of RAM.
+                        sys.refresh_memory();
+                        let now_used = sys.used_memory();
+                        for f in &freed {
+                            log(&format!("RAM cleaner freed {} MB from {} ({} processes)", f.bytes / 1_048_576, f.app, f.procs));
+                            let _ = db::log_cleanup(&conn, ts, &f.app, f.procs, f.bytes, db::RAM_CLEAN_REASON, true);
+                        }
+                        let bytes: u64 = freed.iter().map(|f| f.bytes).sum();
+                        let procs: usize = freed.iter().map(|f| f.procs).sum();
+                        let _ = db::log_ram_run(&conn, ts, before, total, now_used, level as i64, freed.len(), procs, bytes, true);
                     }
                 }
+            }
+        }
+        // A memory leak is a slow climb, so looking for one every few minutes is plenty.
+        if last_leak_check.elapsed() >= Duration::from_secs(300) {
+            last_leak_check = Instant::now();
+            if let Err(e) = leaks::detect(&conn, ts) {
+                log(&format!("leak check failed: {e}"));
             }
         }
 
