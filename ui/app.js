@@ -341,8 +341,9 @@ function renderSide() {
       ${sd.ssh ? servers.map(srvRow).join('') + `<button class="nav" ${cur('keys')} data-go="keys">${ic('key')}SSH keys</button>`
         : `<button class="nav" data-go="settings">${ic('server')}Add servers over SSH</button>`}
     </nav>
-    <div class="side-foot">${upd}${recLine}
+    <div class="side-foot">${recLine}
       <button class="nav" ${cur('settings')} data-go="settings">${ic('gear')}Settings${sd.version ? `<span class="count">v${esc(sd.version)}</span>` : ''}</button>
+      ${upd}
     </div>`;
   setHTML(document.getElementById('side'), html);
 }
